@@ -1,0 +1,3650 @@
+#+AUTHOR: Nikolaos Patikas
+#+Title: Code for Generating Figures 
+
+#+PROPERTY: header-args:R :session mDA-figures*R* :async :noweb yes
+#+PROPERTY: header-args:python :session mDA-figures*python* :async yes :noweb yes
+* Preload
+** R
+#+name: init
+#+begin_src R  
+
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(showtext) ## Montserrat font
+library(scCustomize) ## Viridis high dark palette
+
+generate.plotting.umap.heatmap <- function(seu) {
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000) ## Normalize cell factors 
+  umap <- as.data.frame(seu@reductions$UMAP@cell.embeddings)
+  
+  show.umap <- function(gene, point.size = 0.6){
+    umap <- umap[colnames(seu),]
+    umap[[gene]] <- as.numeric(seu@assays$RNA@data[gene,])
+    umap <- umap[order(umap[[gene]]),]
+    umap[[gene]][umap[[gene]] == 0] <- NaN
+    ggplot(umap, aes(x = UMAP_1, y = UMAP_2, color = !!rlang::sym(gene))) + geom_point(size = point.size, stroke = 0) + ggtitle(gene) + umap.axis +  heatmap.theme
+  }
+  return(show.umap)
+}
+
+generate.plotting.umap.categorical <- function(seu){
+  umap <- as.data.frame(seu@reductions$UMAP@cell.embeddings)
+  show.umap.categorical <- function(category, point.size = 0.6, title = NULL, show.legend = T){
+    if(is.null(title)){
+      title <- category
+    }
+    umap[[category]] <- seu[[]][[category]]
+    ggplot(umap, aes(x = UMAP_1, y = UMAP_2, color = !!rlang::sym(category))) +
+      geom_point(size = point.size, stroke = 0, show.legend = show.legend) +
+      guides(colour = guide_legend(override.aes = list(size=2))) +
+      umap.axis +  integration.theme + ggtitle(title)
+  }
+  return(show.umap.categorical)
+}
+
+
+## Generate scatterplot just from metadata
+generate.plotting.meta.categorical <- function(df){
+  umap <- as.data.frame(df)
+  umap$UMAP_1 <- umap$UMAP1
+  umap$UMAP_2 <- umap$UMAP2
+  show.umap.categorical <- function(category, point.size = 0.6, title = NULL, show.legend = T){
+    if(is.null(title)){
+      title <- category
+    }
+    ggplot(umap, aes(x = UMAP_1, y = UMAP_2, color = !!rlang::sym(category))) +
+      geom_point(size = point.size, stroke = 0, show.legend = show.legend) +
+      guides(colour = guide_legend(override.aes = list(size=2))) +
+      umap.axis +  integration.theme + ggtitle(title)
+  }
+  return(show.umap.categorical)
+}
+
+gene.heatmap <- function(seu, genes.map, color = 'type'){
+  cat <- unlist(lapply(names(genes.map),
+                       FUN = function(name){rep(name, length(genes.map[[name]]))}))
+  genes <- unlist(genes.map)
+  genelist <- data.frame(Gene = genes, type = cat)
+  dpd<-DotPlot(seu, features = unique(genelist[,"Gene"]))
+  dpd.d<-merge(dpd$data,genelist,by.x="features.plot",by.y="Gene")
+
+  pal<- scale_color_manual(values = c(colors, "#000000"))
+  
+  dpd.d$features.plot2 <- factor(dpd.d$features.plot,levels=rev(levels(dpd.d$features.plot)))
+  
+  the.plot <- ggplot(dpd.d,aes(x=id,y=features.plot2,size=pct.exp,col=!!rlang::sym(color),alpha=avg.exp.scaled)) +
+    geom_point(stroke = 0) +
+    ## scale_alpha(aes(range = c(min(avg.exp.scaled), max(avg.exp.scaled)))) +
+    scale_alpha(range=c(-1,2)) +
+    scale_size(range = c(0,3.5)) +
+    xlab("") + labs(size = "Percent expressed",col="Cell type") + color.set + background_grid() +
+    ylab("")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 7, family = my.font) , axis.text.y = element_text(size = 7, family = my.font, face = 'italic'), legend.position = 'none')
+  the.plot
+}
+
+
+plot.gene.list.umap <- function(seu, genes, filename, show.umap, nrows = 1)
+{
+  print(paste(genes[!(genes %in% rownames(seu))], "not found"))
+  genes <- genes[genes %in% rownames(seu)]
+  plots <- lapply(genes, show.umap, point.size = 0.20)
+  p <- Reduce("+",plots) + plot_layout(nrow = nrows)
+
+  width <- ceiling(length(genes) / nrows)*1.5
+  ggsave(filename, height= nrows*1.5, width = width)
+  p
+}
+
+
+
+# #1f77b4
+# #d62728
+# #2ca02c
+# #8c564b
+# #9467bd
+# #7f7f7f
+# #e377c2
+# #ff7f0e
+# #bcbd22
+
+celltype.level.order <- c('oDAn1', 'oDAn2', 'oDAn3', 'FPP', 'NS1', 'NS2', 'NEU1', 'NEU2', "EPI")
+
+colors <- c("#1f77b4", "#d62728", "#2ca02c", "#8c564b", "#9467bd", "#7f7f7f", "#e377c2", "#ff7f0e", "#bcbd22")
+
+colors.fernandes <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b")
+
+colors.treatment <- c("#1f77b4", "#ff7f0e")
+
+colors.genotype <- c("#66c2a5", "#fc8d62", "#8da0cb")
+
+
+## top.to.bottom
+dataset.colors <- c("#8c564b", "#1f77b4", "#d62728", "#2ca02c")
+
+
+
+colors.neurons <- list(wang = c("#e377c2", "#ff7f0e", "#bcbd22"),
+                       fiorenzano = c("#8c564b",  "#9467bd", "#7f7f7f"),
+                       fernandes = c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"),
+                       ansari = colors)
+
+
+
+
+
+#+end_src
+
+#+name: style
+#+begin_src R
+
+font.size <- 6
+my.font = 'sans'
+my.theme <- list(theme_half_open(), theme(text = element_text(size = font.size, family = my.font),
+                                          plot.title = element_text(hjust=0.5, size = 6, family = my.font),
+                                          legend.key.size = unit(2, 'mm'),
+                                          legend.title =element_text(size=4, family = my.font),
+                                          legend.text = element_text(size=5, family = my.font),
+                                          axis.text.x = element_text(size=5, family = my.font),
+                                          axis.text.y = element_text(size=5, family = my.font),
+                                          axis.title.x = element_text(size=4, family = my.font),
+                                          axis.title.y = element_text(size=4, family = my.font)))
+
+
+point.size <- 20
+
+color.set <- scale_color_manual(values = colors)
+dataset.color.set <- scale_color_manual(values = dataset.colors)
+color.set.fit <- scale_fill_manual(values = colors)
+color.treatment.set.fit <- scale_fill_manual(values = colors.treatment)
+color.treatment.set.man.fit <- scale_color_manual(values = colors.treatment)
+color.genotype.set.fit <- scale_fill_manual(values = colors.genotype)
+
+umap.axis <- list(
+  my.theme,
+  theme(
+    axis.ticks = element_blank(),
+    axis.title = element_text(size=6, family = my.font),
+    axis.text.x=element_blank(),
+    axis.text.y=element_blank(),
+    plot.title = element_text(hjust=0.5, size = 6, family = my.font, face = 'plain'),
+    axis.line.x = element_line(size = 0.2),
+    axis.line.y = element_line(size = 0.2)
+   
+  ),
+  labs(x="UMAP1", y = "UMAP2"))
+
+heatmap.theme <-  list(my.theme, scale_color_gradientn(colours= viridis_magma_dark_high, na.value = "grey70"),
+                       theme(
+                         legend.key.width = unit(0.1, 'cm'),
+                         axis.text.x = element_blank(),
+                         axis.line.x = element_blank(),
+                         axis.line.y = element_blank(),
+                         axis.text.y = element_blank(),
+                         axis.title.x = element_blank(),
+                         axis.title.y = element_blank(),
+                         axis.ticks = element_blank(),
+                         legend.title = element_blank(),
+                         legend.text = element_text(size=5),
+                         plot.title  = element_text(hjust = 0.5, size = 8, family = my.font, face = 'italic')))
+
+integration.theme <- list(heatmap.theme[[1]], color.set, heatmap.theme[[3]])
+
+
+#+end_src
+
+#+RESULTS: style
+
+#+RESULTS: init
+: /tmp/babel-Nz5NWG/R-q1Gl93
+
+** Python
+
+#+name: py_fontscan
+#+begin_src python
+from matplotlib import font_manager
+fonts = font_manager.findSystemFonts(fontpaths= ["/usr/share/fonts/TTF/"])
+for font_file in fonts:
+    try:
+        font_manager.fontManager.addfont(font_file)
+    except:
+        print(font_file, 'not added')
+        pass
+
+plt.rcParams['font.family'] = 'Helvetica'
+plt.rcParams['font.sans-serif'] = 'Helvetica'
+
+    
+#+end_src
+
+#+RESULTS: py_font_scan
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+
+#+name: py_load_libraries
+#+begin_src python
+
+from diffexp import *
+from scipy.io import mmwrite
+from sklearn.neighbors import NearestNeighbors
+from statannotations.Annotator import Annotator
+import gc
+import itertools
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scipy.stats
+import seaborn as sns
+
+
+import matplotlib.pyplot as plt
+
+SMALL_SIZE = 10
+MEDIUM_SIZE = 16
+BIGGER_SIZE = 18
+
+# plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
+# plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
+# plt.rc('axes', labelsize=SMALL_SIZE)    # fontsize of the x and y labels
+# plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+# plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+# plt.rc('legend', fontsize=MEDIUM_SIZE)    # legend fontsize
+# plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
+
+sns.set_context('paper')
+custom_params = {"axes.spines.right": False, "axes.spines.top": False, 'font.family':"Helvetica", "font.sans-serif":"Helvetica"}
+sns.set_theme(style="ticks", font_scale = 0.6, rc=custom_params)
+sc.set_figure_params(dpi = 80, dpi_save = 300, scanpy = False)
+
+genotype = sns.color_palette("Set2")
+my_colors = dict(
+    snca = (genotype[1], genotype[2])
+)
+
+#+end_src
+
+#+RESULTS: py_load_libraries
+
+#+name: py_functions
+#+begin_src python
+def print_grid(ann_model, genes, hue, title = None, sharey= False, sharex = False, panels_per_row = 5, **violin_args):
+    import matplotlib.pyplot as plt
+    
+    nrow = int(len(genes)/ (panels_per_row + 1)) + 1
+    panels = panels_per_row ## math.ceil(len(genes)/nrow)
+    
+    calc_figsize = [(panels*0.9) + 1, 0.9*nrow]
+    if not (title is None):
+        calc_figsize[1] += 0.5
+    f, axs  = plt.subplots(nrow, panels, figsize = calc_figsize)
+    for i, (g, ax) in enumerate(zip(genes, axs.flat)):
+        print(g)
+        plot_violin(ann_model, g, 'genotype', ax, **violin_args)
+        
+        if sharey and not (i % panels == 0):
+            ax.axes.yaxis.set_visible(False)
+            
+        ## This may not work axs.flat iterates by rows or columns
+        # if sharex and not (i % panels == 0):
+            # ax.axes.xaxis.set_visible(False)
+    for i, ax in enumerate(axs.flat):
+        if i+1 >len(genes):
+            ax.axis('off')
+    if not title is None:
+        f.suptitle(title)
+    f.tight_layout()
+    
+    return f
+
+
+def norm(_ann):
+    from scipy.sparse import issparse
+    _ann.layers['norm_counts'] = sc.pp.normalize_total(_ann, target_sum = 10000, inplace = False)['X']
+    if issparse(_ann.layers['norm_counts']):
+        _ann.layers['lognorm_counts'] = sc.pp.log1p(_ann.layers['norm_counts'].A)
+    else:
+        _ann.layers['lognorm_counts'] = sc.pp.log1p(_ann.layers['norm_counts'])
+
+
+    return _ann
+
+## Dump ann object to destination directory
+def write_loom(ann, destination):
+    from scipy.io import mmwrite
+    import numpy as np
+    import os
+    if destination[-1] != '/':
+        destination += '/'
+    if not os.path.isdir(destination):
+        if os.path.isfile(destination):
+            raise FileExistsError(destination)
+        os.makedirs(destination, exist_ok=True)
+        
+    # ann.obs.to_csv(prefix+ 'obs.csv')
+    # ann.var.to_csv(prefix+ 'var.csv')
+    ann.var['Gene'] = ann.var_names
+    ann.obs['CellID'] = ann.obs_names
+    ann.write_loom(destination+'loom.loom')
+    for k in ['scVI', 'umap']:
+        obsm_name = 'X_'+k
+        if obsm_name in ann.obsm.keys():
+            print('Writing obsm', k)
+            np.savetxt(destination+k.upper(),ann.obsm[obsm_name])
+    print("Saved in", destination, "directory")
+
+
+
+def assign_clusternames(_ann, predicate = 'X_scVI-louvain-0.5'):
+    celltypes = ["oDAn1", "oDAn1", "oDAn2", "oDAn3", "FPP",
+                 "NS1", "NS2", "NEU1", "NEU2", "oDAn3", "oDAn3", "EPI"]
+
+    clusters = ["2", "10", "5", "0", "3","6","11","9","7","4", "1", "8"]
+
+
+    _ann.obs['celltype'] = _ann.obs[predicate]
+
+    _ann.obs['Cell Type'] = 'Unknown'
+    for c, name in list(zip(clusters, celltypes)):
+        print(c, name)
+        _ann.obs.loc[_ann.obs['celltype'] == c, 'Cell Type'] = name
+
+    _ann = _ann[_ann.obs['Cell Type'] != 'Unknown']
+    return _ann
+
+def fix_metadata(_ann):
+    _ann.obs["genotype"] = _ann.obs['genotype'].cat.reorder_categories(['KOLF2', 'SNCA-corr', 'SNCA-3x'])
+
+def curate_file(_ann):
+    _ann = fix_metadata(_ann)
+    _ann = assign_clusternames(_ann)
+    _ann = norm(_ann)
+
+
+def getlfc(pred, factor):
+    def lfc(gb):
+        return gb.apply(
+            lambda x : "{:.2f}".format(np.log2(x[x[pred] != factor].lfc.mean()) -
+                                       np.log2(x[x[pred] == factor].lfc.mean())))        
+    return lfc
+
+
+    
+def violin_plot_hue(ann, genes, x, hue, base_factor, rows = 2):
+    import math
+    panels = math.ceil(len(genes)/rows)
+    f, axs  = plt.subplots(rows, panels, figsize= (panels*2 + 2, 2.5*rows))
+
+    base_factor = list(ann.obs[hue].cat.categories)[0]
+    lfc_comparison = getlfc(hue, base_factor)
+    
+    for g, ax in zip(genes, axs.flat):
+        print(g)
+        _df = ann.obs[[hue,x]].copy()
+        _df[g] = ann.layers['lognorm_counts'][:, ann.var_names == g].flatten()
+        _df[g + 'unlog'] = ann.layers['lognorm_counts'][:, ann.var_names == g].flatten()
+        _df['lfc'] = ann.layers['norm_counts'][:, ann.var_names == g].A.flatten()
+    
+        v = sns.violinplot(data = _df, y = g, x = x, hue=hue, ax = ax)
+        hue_labels = v.get_legend_handles_labels()[1]
+        vals = lfc_comparison(_df.groupby(x))
+        
+        
+        x_labels = list(map(lambda x : x.get_text(), v.get_xticklabels()))
+        
+        pairs = list(map(lambda x : tuple(itertools.product([x], hue_labels)), x_labels))
+        v.set(ylabel=None, xlabel = None)
+    
+        ax.legend().remove()
+        ax.set_title(g, pad = 25)
+        
+        # v.set_xticklabels(v.get_xticklabels(), rotation=0)
+    
+        annot = Annotator(v, pairs, data = _df, x = x , y = g, hue = hue)
+        # annot.configure(test='Mann-Whitney', text_format='star', loc='outside')
+
+        annot.configure(loc='outside')
+        annot.set_custom_annotations(vals)
+        annot.annotate()
+        
+    if len(f.axes) > len(genes):
+        f.axes[-1].axis('off')
+        
+    labels, lines = f.axes[0].get_legend_handles_labels()
+    f.legend(labels, lines, loc = 'lower right', bbox_to_anchor = (0.9, 0.2))
+    return f
+
+
+def getlfc(pred, factor):
+    def lfc(x):
+        return "{:.2f}".format(np.log2(x[x[pred] != factor].lfc.mean()) -
+                                       np.log2(x[x[pred] == factor].lfc.mean()))
+    return lfc
+
+
+
+def plot_violin(ann_model, g, hue, ax, **violin_args):
+    base_factor = list(ann_model.obs[hue].cat.categories)[-1]
+    lfc_comparison = getlfc(hue, base_factor)
+
+    _df = ann_model.obs[[hue]].copy()
+    _df[g] = ann_model.layers['lognorm_counts'][:, ann_model.var_names == g].flatten()
+    _df[g + 'unlog'] = ann_model.layers['lognorm_counts'][:, ann_model.var_names == g].flatten()
+    _df['lfc'] = ann_model.layers['norm_counts'][:, ann_model.var_names == g].A.flatten()
+    
+    if 'orient' in violin_args.keys() and violin_args['orient'] == 'h':
+        # param = dict(data = _df, y = g, x=hue)
+        param = dict(data = _df, x = g, y=hue)
+        label_index = 0
+    else:
+        param = dict(data = _df, y = g, x=hue)
+        label_index = 1
+
+    v = sns.violinplot(**param, **violin_args, ax = ax)
+    
+    # hue_labels = v.get_legend_handles_labels()[label_index]
+    vals = lfc_comparison(_df)
+    if 'orient' in violin_args.keys() and violin_args['orient'] == 'h':
+        x_labels = list(map(lambda x : x.get_text(), v.get_yticklabels()))
+        
+    else:
+        x_labels = list(map(lambda x : x.get_text(), v.get_xticklabels()))
+        # print(x_labels)
+
+    v.set(ylabel=None, xlabel = None)
+    
+    ax.legend().remove()
+    t = g
+    if violin_args['orient'] != 'h':
+        ax.set_title(t, pad = 25, style = 'italic')
+    else:
+        ax.set_title(t, style = 'italic')
+        
+
+    annot = Annotator(v,[x_labels], orient = violin_args['orient'], **param)
+    annot.configure(loc='outside')
+    annot.set_custom_annotations([vals])
+    annot.annotate()
+
+    ## Optional
+    # annot.configure(test='Mann-Whitney', text_format='star', loc='outside')
+    # pvalue: Mann-Whitney P_val:1.083e-05 U_stat=7.297e+05
+    # annot.apply_and_annotate()
+
+    # labels, lines = f.axes[0].get_legend_handles_labels()
+    return ax
+
+def bar(ptws, col, color = 'red', title = None, height = 2.6):
+    ptws = ptws.copy()
+    col_name = '_LogP_'+ col
+    ptws[col_name] = -ptws[col_name]
+    ptws = ptws.sort_values(col_name)
+    path_desc = ptws['Description']
+    from textwrap import wrap
+    path_desc = path_desc.apply(lambda l: '\n'.join(wrap(l, 30)))
+
+    ## 
+    f, ax = plt.subplots(figsize = (3, height))
+    ax.barh(path_desc, ptws[col_name], height = 0.25, color = color, edgecolor = 'black')
+    
+    # Hide the right and top spines
+    ax.spines.right.set_visible(False)
+    ax.spines.top.set_visible(False)
+    
+    # Only show ticks on the left and bottom spines
+    ax.yaxis.set_ticks_position('left')
+    ax.xaxis.set_ticks_position('bottom')
+
+    for axis in ['bottom','left']:
+        ax.spines[axis].set_linewidth(0.5)
+
+    # increase tick width
+    ax.tick_params(width=0.5)
+    ax.set_xlabel('-log10(p-value)', size = 6)
+    if not title is None:
+        ax.set_title(title)
+    # f.tight_layout()
+    return f
+
+#+end_src
+
+#+RESULTS: py_functions
+
+#+name: py_config
+#+begin_src python
+
+<<py_load_libraries>>
+<<py_functions>>
+<<py_fontscan>>
+
+#+end_src
+
+#+RESULTS: py_config
+
+
+* Figure 2 - Characterization of Day 47 organoid culture using scRNAseq
+:PROPERTIES:
+:header-args:R: :session mDA-figure2*R* :async :noweb yes 
+:ORDERED:  t
+:END:
+
+#+begin_src R
+<<init>>
+<<style>>
+
+seu <-readRDS('seurat-conversion/mono-unt.rds')
+Idents(seu) <- factor(Idents(seu), levels = celltype.level.order)
+seu[["Cell.Type"]] <- Idents(seu)
+## umap$genotype <- seu[[]]$genotype
+show.umap.categorical <- generate.plotting.umap.categorical(seu)
+show.umap.heatmap <- generate.plotting.umap.heatmap(seu)
+
+seu <- NormalizeData(seu)
+seu <- ScaleData(seu)
+#+end_src
+
+#+RESULTS:
+
+
+#+begin_src R :pandoc t
+
+## UMAP of OhMO Cells showing the different cell types identified
+<<2A>>
+## TH Heatmap
+<<2B>>
+## Gene Matrix
+<<2C>>
+## Pie Chart
+<<2D>>
+
+## Marker Genes
+<<2E>>
+
+<<sf2B>>
+
+ggsave('figures/fig2a.pdf', p1, height = 3, width = 3, unit = "in")
+ggsave('figures/fig2b.pdf', p2, height = 2, width = 2, unit = "in")
+ggsave('figures/fig2c.pdf', p3, height = 6, width = 2, unit = "in")
+ggsave('figures/fig2d.pdf', p4, height = 2, width = 2, unit = "in")
+## ggsave('figures/fig2e.pdf', p5, height = 1.3, width = 7, unit = "in")
+
+ggsave('figures/sfig2b.pdf', sfig2b, height = 2.5, width = 7, unit = "in")
+
+#+end_src
+
+#+RESULTS:
+: figures/sfig2b.pdf
+** UMAP of Cell types
+#+name: 2A
+#+begin_src R
+
+base.plot <- show.umap.categorical("Cell.Type", show.legend = F, point.size = 0.45)
+umap <- base.plot$data
+ct.centers <- umap %>% group_by(Cell.Type) %>% summarize(UMAP1 = mean(UMAP_1), UMAP2 = mean(UMAP_2))
+
+p1 <- base.plot + color.set + 
+  geom_label(aes(x=UMAP1, y=UMAP2, label = Cell.Type), colour = "black", alpha = 0.55,  ct.centers, size = 2, family= my.font) + umap.axis
+
+
+#+end_src
+
+#+RESULTS: 2A
+
+#+RESULTS:
+
+** UMAP of TH
+#+name:2B
+#+begin_src R
+
+## ggplot(umap, aes(x = UMAP_1, y = UMAP_2, color = TH)) + geom_point(size = 0.6, stroke = 0) + ggtitle("TH") + umap.axis +  heatmap.theme
+p2 <- show.umap.heatmap("TH", point.size = 0.3)
+
+
+#+end_src
+
+#+RESULTS: 2B
+
+** Gene expression matrix
+#+RESULTS: 2C
+: /tmp/babel-Q5bX5I/R-gvzuXH
+
+#+name: 2C
+#+begin_src R
+
+rizwan_gene_list = list( "midbrain_floor_plate"= c( "ARX", "FERD3L",
+    "ARL13B", "CORIN" ),
+    "neural_stem_cell"= c( "SOX2", "NES", "MKI67" ),
+    "midbrain_progenitor"= c("FOXA2", "LMX1A", "LMX1B", "EN1", "EN2",
+    "HES1", "SOX6", "OTX2", "VIM", "NFIA", "SLIT2", "RFX4", "SLC1A3",
+    "ATOH1"),
+    "dopamine_neuron_differentiation"= c( "ASCL1", "TUBB3", "PITX3",
+    "NEUROG2", "NR4A2"),
+    "Dan_Neuron_maturation"= c( "TH", "SLC6A3", "SLC18A2",
+    "KCNJ6", "ALDH1A1", "MAP2", "CALB1", "DDC", "LMO3",
+    "SYT1", "DCX", "PBX1", "SNAP25", "MARCKS", "NEFM" ),
+    "wnt_signalling" = c("WNT5A", "GSK3B"),
+    ## "astrocytes"= c( "GFAP", "MLC1", "SLC1A3", "SLC1A2", "GLUL",
+    ## "S100B", "ALDH1L1" ),
+    ## "oligodentrocytes"= c( "GSN", "CNP", "PLEKHB1", "PDGFRA", "CSPG4",
+    ## "OLIG1", "OLIG2", "OLIG3", "CLDN11", "MBP", "MOG", "SOX10" ),
+    "glutamatergic_neuron"= c( "SLC17A7", "SLC17A6" ),
+    "gaba_neuron"= c( "GABRA1", "GABRA2", "GAD1" ),
+    ## "hindbrain"= c( "GBX2" ),
+    ## "forebrain"= c( "PAX6", "FOXG1" ),
+    ## "serotonergic"= c( "TPH1", "SLC18A2", "SLC18A1" ),
+    ## "cholesterol" = c("SQLE", "HMGCR"),                    
+    "Neurodegeneration"= c( "APP", "MAPT", "SNCA", "BDNF", "TUBB3", "RBFOX3", "ELAVL4")
+   )
+
+heatmap_list = list(
+  "dan_identity" = c("TH", "KCNJ6", "EN1", "SLC18A2", "DDC", "VAMP2", "SNAP25"),
+  "neuronal" = c("SYT1", "DCX", "MAP2", "TUBB3", "BDNF", "RBFOX3"),
+  "neurodegeneration" = c("SNCA", "APP", "MAPT"),
+  "dan_specification" = c("LMX1A", "FOXA2", "NR4A2"),
+  "progenitors" = c("VIM", "NES", "SOX2", "MKI67", "HES1", "OTX2", "RFX4", "SLIT2", "MSX1")
+)
+
+
+
+
+p3 <- gene.heatmap(seu, heatmap_list)
+
+#+end_src
+
+#+RESULTS: 2D
+: /tmp/babel-Nz5NWG/R-Fb45Yc
+
+
+
+
+
+
+** Pie Chart of cell type proportions
+
+#+name: 2D
+#+begin_src R
+
+df <- seu[[]]
+
+cells.in.clusters <- df %>% group_by(Cell.Type) %>% summarize(cells = n())
+
+data <- cells.in.clusters %>% 
+  arrange(desc(cells)) %>%
+  mutate(prop = sum(cells) - cumsum(cells) + 0.5*cells, perc = paste0(as.character(as.integer(cells/sum(cells)*100)), "%"))
+
+data$Cell.Type <- factor(data$Cell.Type, levels = data$Cell.Type)
+cpalette <- colors[match(as.character(data$Cell.Type),celltype.level.order)]
+
+p4 <- ggplot(data, aes(x="", y=-cells, fill=Cell.Type)) + 
+  geom_bar(stat="identity", width=0.8, color="white") +   scale_fill_manual(values = cpalette) +
+  coord_polar("y", start=22) + geom_col(color = "black") + theme_void() + 
+  theme(legend.position="none",axis.text = element_blank(),axis.line = element_blank(),axis.ticks = element_blank()) + xlab("") + ylab("") +
+  geom_text(aes(y=-prop, label = perc, color = Cell.Type), x=1.6, alpha = 0.9, size =2.5, family = my.font, check_overlap = T) +  scale_colour_manual(values=cpalette) +
+  geom_text(aes(y=-prop, label = Cell.Type), x=1.2, color = "white", alpha = 0.9, size = 2,  check_overlap = T, family = my.font)
+
+#+end_src
+
+
+** Marker Genes
+
+- HSP90B1, DDIT4, LMX1A, DDIT3, PBX3, DDC
+- SLIT2, TOP2A
+#+name: 2E
+#+begin_src R
+<<init>>
+<<style>>
+
+seu <-readRDS('seurat-conversion/mono-unt.rds')
+seu <- NormalizeData(seu)
+seu <- ScaleData(seu)
+
+
+
+epi = c("CLIC6", "TTR", "HTR2C", "SULT1E1", "PLS3", "CA2", "RBM47",
+"MITF",
+"GBP1",
+"ALDH1A1",
+"COL1A2",
+"IBSP",
+"CA4",
+"RAX",
+"TRPM3",
+"RPE65",
+"GPC3",
+"DRD4",
+"DMRT3")
+
+
+
+supp.genes = list(
+  "oDAn1" = c("SLC17A6"),
+  "NS1" = c("HES5"),
+  "NEU" = c("GBX2", "GAD1", "OTX2"),
+  "EPI" = c("CA2","CLIC6","HTR2C","TRPM3","TTR"),
+  "oDAn2" = c("POU4F1", "TFAP2B", "CALB1", "TFAP2B"),
+  "oDAn3" = c("HSPA6", "HSPA1A", "HSPA1B", "DNAJB1")
+)
+
+
+
+# "Car2,Clic6,Htr2c,Rbm47,Slc13a4,Trpm3,Ttr"
+
+## supp.genes = c( "GATA3", "GBX2", "PAX7", "AQP3", "H2AC8", )
+
+## supp.genes = c("HES1", "NES", "LMX1A", "DDIT4","DDIT3", "TUBB3","RBFOX3", "MKI67", "SLIT2", "SOX3", "NOTCH1", "SNCA", "SOX2", "BCL11A", "HES5", "PAX7", "SHH", "WNT7B", "SOX2")
+
+sfig2f <- gene.heatmap(seu, supp.genes, color = 'id')
+
+ggsave('figures/sfig2f.pdf', height = 2.5, width = 3)
+#+end_src
+
+#+RESULTS: 2E
+: figures/sfig2f.pdf
+
+#+RESULTS:
+
+** Heatmaps
+#+begin_src R
+<<init>>
+genes = c("LMX1A", "FOXA2", "NR4A2", "SOX2", "KCNJ6")
+plot.gene.list.umap(seu, genes, "figures/fig2e.pdf", show.umap.heatmap)
+## plots <- lapply(genes,show.umap)
+## p <- Reduce("+",plots) + plot_layout(nrow = nrows)
+#+end_src
+
+#+RESULTS:
+
+
+#+begin_src R
+
+genes2 = c("SOX3", "SOX6", "NOTCH1", "MKI67", "LMO4")
+plot.gene.list.umap(seu, genes2, "figures/sfig2e.pdf", show.umap.heatmap, nrows = 2)
+
+#+end_src
+
+#+RESULTS:
+
+* Figure 3 - Transcriptome integration with /in-vitro/ and /in-vivo/ models
+:PROPERTIES:
+:header-args:R: :session mDA-figure3*R* :async :noweb yes
+:header-args:python: :session mDA-figure3*python* :async yes :noweb yes 
+:END:
+
+** SNpc data
+#+begin_src R
+
+<<init>>
+<<style>>
+
+seu <- readRDS('seurat-conversion/wang_annotated.rds')
+df <- as.data.frame(seu[[]])
+seu@meta.data$ansari_prediction <- factor(seu@meta.data$ansari_prediction, levels = c("oDAn1", "oDAn2", "oDAn3", "NEU1", "NEU2"))
+show.umap.snpc <-  generate.plotting.umap.categorical(seu)
+show.umap.snpc.heatmap <-  generate.plotting.umap.heatmap(seu)
+0
+#+end_src
+
+#+RESULTS:
+: 0
+
+#+begin_src R
+
+size <- 0.2
+
+p1 <- show.umap.snpc('wang.celltype', title = 'SNpc neuronal clusters', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["wang"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+p2 <- show.umap.snpc('ansari_prediction', title = 'OhMOs cell type prediction', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["ansari"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+
+p <- p1 + p2 + plot_layout(nrow = 2)
+
+ggsave("figures/fig3d-snpc.pdf", height = 3, width = 2)
+
+
+
+## p5 <- show.umap.snpc.heatmap("SNCA", point.size = size)
+
+
+#+end_src
+
+#+RESULTS:
+: figures/fig3f-snpc-genes.pdf
+
+#+begin_src R
+
+size <- 0.2
+
+p1 <- show.umap.snpc('wang.celltype', title = 'SNpc neuronal clusters', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["wang"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+p2 <- show.umap.snpc('fiorenzano_prediction', title = 'Fiorenzano cell type prediction', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["fiorenzano"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+
+p <- p1 + p2 + plot_layout(nrow = 2)
+
+ggsave("figures/sfig3-fiorenzano-umap.pdf", height = 3, width = 2)
+#+end_src
+
+#+RESULTS:
+: figures/sfig3-fiorenzano-umap.pdf
+
+
+
+#+begin_src R
+
+p3 <- show.umap.snpc.heatmap("TH", point.size = size)
+p4 <- show.umap.snpc.heatmap("SLC6A3", point.size = size)
+## p4 <- show.umap.snpc.heatmap("KCNJ6", point.size = size)
+
+p <- p3 + p4 + plot_layout(nrow = 2)
+
+ggsave("figures/fig3f-snpc-genes.pdf", height = 3, width = 2)
+
+#+end_src
+#+begin_src R
+
+p <- show.umap.snpc('donor', title = 'Donors', point.size = size) + umap.axis
+p5 <- show.umap.snpc.heatmap("RIT2", point.size = size)
+p + p5
+ggsave("figures/sfig3a.pdf", height = 1.7, width = 2.3)
+
+#+end_src
+
+#+RESULTS:
+: figures/sfig3a.pdf
+
+
+** Fiorenzano
+#+begin_src R
+
+<<init>>
+<<style>>
+
+seu <- readRDS('seurat-conversion/fiorenzano_annotated.rds')
+show.umap.fiorenzano <-  generate.plotting.umap.categorical(seu)
+show.umap.fiorenzano.heatmap <-  generate.plotting.umap.heatmap(seu)
+0
+#+end_src
+
+#+RESULTS:
+: 0
+
+#+begin_src R
+
+size <- 0.2
+
+p1 <- show.umap.fiorenzano('fiorenzano.celltype', title = 'Fiorenzano neuronal clusters', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["fiorenzano"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+p2 <- show.umap.fiorenzano('wang_prediction', title = 'SNpc Neuronal Cluster prediction', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["wang"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+
+p <- p1 + p2 + plot_layout(nrow = 2)
+
+ggsave("figures/sfig3-fiorenzano.pdf", height = 3, width = 2)
+
+
+
+## p5 <- show.umap.snpc.heatmap("SNCA", point.size = size)
+
+
+#+end_src
+
+#+RESULTS:
+: figures/sfig3-fiorenzano.pdf
+
+#+begin_src python
+
+<<py_config>>
+
+ann = sc.read("curated-objects/fiorenzano-organoids-day60-sample-correction.h5ad")
+sc.pl.umap(ann, color = "celltypes", legend_fontsize = 12, title = '')
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1192: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if is_string_dtype(df[key]) and not is_categorical(df[key])
+#+attr_org: :width 581 :height 269
+[[file:./.ob-jupyter/2bc1e6065e6ff3c81847b6b08a4cc63d9a4e7779.png]]
+:END:
+
+
+
+** Ansari
+#+begin_src R
+
+<<init>>
+<<style>>
+
+seu <- readRDS('seurat-conversion/ansari_annotated.rds')
+seu@meta.data$ansari.celltype <- factor(seu@meta.data$ansari.celltype, levels = c("oDAn1", "oDAn2", "oDAn3", "NEU1", "NEU2"))
+show.umap.ansari <-  generate.plotting.umap.categorical(seu)
+show.umap.ansari.heatmap <-  generate.plotting.umap.heatmap(seu)
+0
+#+end_src
+
+#+RESULTS:
+: 0
+
+#+begin_src R
+
+size <- 0.2
+
+p1 <- show.umap.ansari('ansari.celltype', title = 'Fiorenzano neuronal clusters', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["ansari"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+p2 <- show.umap.ansari('wang_prediction', title = 'SNpc Neuronal Cluster prediction', point.size = size) +
+  umap.axis +
+  scale_color_manual(values = colors.neurons[["wang"]]) +
+  theme(axis.line.x = element_line(size = 0.2), axis.line.y = element_line(size = 0.2))
+
+
+p <- p1 + p2 + plot_layout(nrow = 2)
+
+ggsave("figures/fig3-ansari-wang.pdf", height = 3, width = 2)
+
+
+
+## p5 <- show.umap.snpc.heatmap("SNCA", point.size = size)
+
+
+#+end_src
+
+#+RESULTS:
+: figures/fig3-ansari-wang.pdf
+
+
+
+
+
+** 2D Data with OhMOs
+#+begin_src R
+
+na.color = "#CCCCCC"
+seu.2d <- readRDS('seurat-conversion/integration-3d-2d.rds')
+seu.2d@meta.data$dataset <- 'OhMOs'
+seu.2d@meta.data$dataset[seu.2d@meta.data$batch == "0"] <- '2D mDA'
+seu.2d@meta.data$OhMOs.celltype <- factor(seu.2d[[]]$ansari.celltype, levels = c(celltype.level.order, "nan"))
+seu.2d@meta.data$fernandes.celltype <- factor(seu.2d[[]]$fernandes.celltype, levels = c("DAn1", "DAn2", "DAn3", "DAn4", "Prog1", "Prog2", "nan"))
+show.umap.2d <-  generate.plotting.umap.categorical(seu.2d)
+show.umap.2d.heatmap <-  generate.plotting.umap.heatmap(seu.2d)
+
+p0 <- show.umap.2d('dataset', title = '', point.size = size) + umap.axis + scale_color_manual(values = colors.treatment)
+p1 <- show.umap.2d('OhMOs.celltype', title = '', point.size = size) + umap.axis + scale_color_manual(values = c(colors, na.color))
+p2 <- show.umap.2d('fernandes.celltype', title = '', point.size = size) + umap.axis + scale_color_manual(values = c(colors.fernandes, na.color))
+## p2 <- show.umap.2d.heatmap("RIT2", point.size = size)
+p <- p0 + p1 + p2
+ggsave(paste0("figures/fig3a-fernandes.pdf"), height = 2, width = 7)
+
+#+end_src
+
+#+RESULTS:
+: figures/fig3a-fernandes.pdf
+
+
+#+begin_src R
+p <- show.umap.2d.heatmap('CALB1')
+
+ggsave(paste0("figures/sfig3-CALB1.pdf"), height = 2, width = 2)
+
+#+end_src
+
+#+RESULTS:
+: figures/sfig3-CALB1.pdf
+
+
+** Integration with existing mDA 2D model and 3D model
+
+#+begin_src R
+
+<<init>>
+<<style>>
+
+library(stringr)
+datasets <- c('fiorenzano', 'fernandes', 'ansari', 'wang')
+
+
+wang.meta <- read.csv(paste0("aux-files/label_transfer-wang.csv"))
+wang.meta$UMAP1 <- wang.meta$UMAP_1
+wang.meta$UMAP2 <- wang.meta$UMAP_2
+
+labels = list(wang = wang.meta)
+
+plots = list()
+
+for(d in c('fiorenzano', 'fernandes', 'ansari')){
+  fn = paste0("aux-files/label_transfer-" , d,  ".csv")
+  print(fn)
+  labels[[d]] = read.csv(fn)
+  labels[[d]]$UMAP1 <- labels[[d]]$UMAP_1
+  labels[[d]]$UMAP2 <- labels[[d]]$UMAP_2
+  orig.annot <- paste0(d,".celltype")
+  title.plot <- paste(str_to_title(d))
+  if(d == "ansari"){
+    title.plot <- "OhMO"
+    labels[[d]]$ansari.celltype <- factor(labels[[d]]$ansari.celltype, levels = c("oDAn1", "oDAn2", "oDAn3", "NEU1", "NEU2"))
+    
+  }
+
+  title.plot <- paste(title.plot, "DAn")
+  
+  labels[[d]][[orig.annot]] <-  factor(labels[[d]][[orig.annot]])
+  labels[[d]][["wang_prediction"]] <-  factor(labels[[d]][["wang_prediction"]])
+
+  show.umap.labels <- generate.plotting.meta.categorical(labels[[d]])
+  
+  ps.scaled <- (13000/dim(labels[[d]])[1])/5
+  print(ps.scaled)
+  plots[[d]] = list(show.umap.labels(orig.annot, title = title.plot, point.size= ps.scaled )  + scale_color_manual(values = colors.neurons[[d]]),
+                    show.umap.labels("wang_prediction", title = "SNpc predicted clusters", point.size = ps.scaled) + scale_color_manual(values = colors.neurons[["wang"]]))
+  p <- Reduce("+",plots[[d]]) + plot_layout(ncol = 1)
+  ggsave(paste0("figures/fig3ab-", d, "-wang.pdf"), height = 3, width = 2)
+}
+
+
+
+
+#+end_src
+
+#+RESULTS:
+
+
+
+#+begin_src R
+library(dplyr)
+
+dn <- "fiorenzano"
+ext <- "wang"
+
+
+
+confusion.dotplot <- function(labels, dn, ext){
+  df <- labels[[dn]]
+
+  df.ext <- labels[["wang"]]
+  ct <- paste0(dn,".celltype")
+
+  pred.col <- paste0(ext,"_prediction")
+  ct.ext <- paste0("wang.celltype")
+  ext.pred <- paste0(dn, "_prediction")
+
+
+  ## title <- paste0("Classifier Consensus")
+  title <- ""
+  props.wang <- df.ext %>% group_by(!!rlang::sym(ct.ext), !!rlang::sym(ext.pred)) %>% summarize(n = n()) %>% mutate(freq = round(n / sum(n)*100, 2) ) %>%  arrange(desc(freq))
+  props.wang$join <- paste0(props.wang[[ext.pred]], "_", props.wang[[ct.ext]])
+
+
+  props <- df %>% group_by(!!rlang::sym(ct), wang_prediction) %>% summarize(n = n()) %>% mutate(freq = round(n / sum(n)*100, 2) ) %>%  arrange(desc(freq))
+  props$join <- paste0(props[[ct]], "_", props[[pred.col]])
+
+  merged.props <- merge(props, props.wang, by="join")
+  ggplot(merged.props,aes(x=!!rlang::sym(ct),y=!!rlang::sym(pred.col),size=freq.x, alpha = freq.y, col = !!rlang::sym(ct))) +
+    geom_point(stroke = 0) +
+    scale_size(range = c(1,7)) +
+    xlab("Dataset reference") +
+    ylab("SNpc Cluster prediction") +
+    theme(axis.title = element_text(size=6, family = my.font), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 7, family = my.font) , axis.text.y = element_text(size = 7, family = my.font, face = 'italic'), legend.position = 'none', plot.title  = element_text(hjust = 0.5, size = 8, family = my.font)) + ggtitle(title) + scale_color_manual(values = colors.neurons[[d]])
+}
+
+for(d in c('fiorenzano', 'fernandes', 'ansari')) {
+  p <- confusion.dotplot(labels, d, "wang")
+  ggsave(paste0("figures/fig3ab2", d, ".pdf"), width = 1.5, height = 2.5)
+}
+
+
+
+
+
+
+#+end_src
+
+#+RESULTS:
+** Gene Marker Panels
+#+begin_src R
+<<init>>
+<<style>>
+
+seu <- readRDS("seurat-conversion/neuron_all-datasets.rds")
+seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+
+df <- as.data.frame(seu[[]])
+df$colnames <- colnames(seu)
+
+## Since we are normalizing Sample 1000 cells from each group
+samples.selected <- df %>% group_by(id) %>% sample_n(1000, replace = TRUE)
+seu.subsample <- seu[,samples.selected$colnames]
+seu.subsample <- RenameCells(seu.subsample, paste0(colnames(seu.subsample), "_", 1:ncol(seu.subsample)))
+Idents(seu.subsample) <- seu.subsample[[]]$id
+seu.subsample <- NormalizeData(seu.subsample,normalization.method = "LogNormalize", scale.factor = 10000)
+#+end_src
+
+#+RESULTS:
+
+#+begin_src R
+gene.atlas.heatmap <- function(seu, genes.map, color = 'type'){
+
+  cat <- unlist(lapply(names(genes.map),
+                       FUN = function(name){rep(name, length(genes.map[[name]]))}))
+  
+  genes <- unlist(genes.map)
+  genelist <- data.frame(Gene = genes, type = cat)
+  
+  dpd<-DotPlot(seu,features = unique(genelist[,"Gene"]))
+  
+  dpd.d<-merge(dpd$data,genelist,by.x="features.plot",by.y="Gene")
+  
+  pal<- scale_color_manual(values = c(colors, "#000000"))
+  dpd.d <- dpd.d %>% group_by(features.plot) %>% mutate(norm.exp = avg.exp / max(avg.exp))
+
+  print(head(dpd.d$features.plot))
+  dpd.d$features.plot2 <- factor(dpd.d$features.plot,levels=levels(dpd.d$features.plot))
+  
+  dpd.d$dataset <- unlist(lapply(strsplit(as.character(dpd.d$id), "_"), function(x){x[1]}))
+  dpd.d$ct <- unlist(lapply(strsplit(as.character(dpd.d$id), "_"), function(x){tail(x, n = 1)}))
+
+  ## Very dodgy code to order the levels
+  dpd.d$dataset <- factor(dpd.d$dataset, levels=c("2D", "OhmO", "hSNpc", "3D"))
+  dpd.d$test <- with(dpd.d, interaction(dataset, ct, sep=  "_", lex.order = TRUE))
+  dpd.d$test <- factor(dpd.d$test, levels = rev(levels(dpd.d$test)))
+  
+  the.plot <- ggplot(dpd.d,aes(y= test, x=features.plot2, size=norm.exp, col=!!rlang::sym(color), alpha = pct.exp))+
+    geom_point(stroke = 0)+
+    ## scale_alpha(aes(range = c(min(avg.exp.scaled), max(avg.exp.scaled)))) +
+    scale_alpha(range=c(0.2, 1)) +
+    scale_size(range = c(0, 3.5)) +
+    xlab("") + labs(size = "Percent expressed",col="Cell type") + dataset.color.set + theme(panel.background = element_blank()) +
+    ylab("")+ theme(axis.text.x = element_text(angle = 45, vjust = 0, hjust=-0.1, size = 7, family = my.font, face = 'italic') ,
+                    axis.text.y = element_text(size = 7, family = my.font),
+                    legend.position = 'none',
+                    axis.line.x = element_line(size = 0.2),
+                    axis.line.y = element_line(size = 0.2))
+  the.plot
+}
+
+genes_list = list(
+    "dopamine_metabolism"= c("TH","SLC6A3", "DDC", "DRD1", "DRD2", "SLC18A1", "SLC18A2" ),
+    "mDA_specification"= c("FOXA2","LMX1A","NR4A2", "PITX3" ,"KCNJ6","LMO3", "ALDH1A1", "BCL11A", "DCX", "SOX6"),
+    "synaptic_vesicles_function" = c("VAMP2", "SNAP25", "SNCA"),
+    "neuronal_identity" = c("RBFOX3", "TUBB3", "SYT1", "SYT4"),
+    ## "wnt_signaling" = c("WNT1", "GSK3B","LRP5", "LRP6", "FZD1", "CTNNB1"),
+    "glutamate_transporters"=  c("SLC17A6", "SLC17A7", "SLC17A8")
+ )
+
+p1 <- gene.atlas.heatmap(seu.subsample, genes_list, color = 'dataset')
+p1 + scale_x_discrete(position = "top") 
+ggsave('figures/fig3d.pdf', height = 2.5, width = 7)
+#+end_src
+
+#+RESULTS:
+: figures/fig3d.pdf
+
+#+begin_src R
+
+genes_list = list("Dopamine" = c("TH","KCNJ6",  "SLC17A6", "SLC17A7", "SLC6A3", "SNAP25", "SLC18A2"),
+                  "OhMOS" = c("NR4A2", "LMX1A", "FOXA2", "CORIN","BCL11A"),
+                  "Spatial specification" = c()
+                  )
+
+p1 <- gene.atlas.heatmap(seu.subsample, genes_list, color = 'dataset')
+p1 + coord_flip()
+
+## ggsave('figures/sfig3d.pdf', height = 2.5, width = 5)
+
+#+end_src
+
+#+RESULTS:
+: figures/fig3d.pdf
+
+
+
+
+
+#+begin_src python
+import scanpy as sc
+
+ann = sc.read('curated-objects/neuron_objects_integrations/wang_annotated.h5ad')
+
+sc.pl.umap(ann, color= ['donor'], layer = 'lognorm_counts', wspace = 0.4, save = '-sfig3a.pdf')
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: WARNING: saving figure to file figures/umap-sfig3a.pdf
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1192: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if is_string_dtype(df[key]) and not is_categorical(df[key])
+[[file:./.ob-jupyter/9c07c478d3206ee585792e942fb32b8365f619ea.png]]
+:END:
+
+
+
+
+
+
+
+* Figure 4 - Effect of /SNCA-3x/ on oDAn1 neurons
+:PROPERTIES:
+:header-args:R: :session mDA-figure4*R* :async :noweb yes
+:header-args:python: :session mDA-figure4*python* :async yes :noweb yes 
+:ORDERED:  t
+:END:
+
+#+begin_src R
+<<init>>
+<<style>>
+seu <-readRDS('seurat-conversion/mono-unt.rds')
+seu <- seu[,rownames(subset(seu[[]], genotype %in% c("SNCA-3x", "SNCA-corr")))]
+
+    
+Idents(seu) <- factor(Idents(seu), levels = celltype.level.order)
+seu[["Cell.Type"]] <- Idents(seu)
+
+
+show.umap.categorical <- generate.plotting.umap.categorical(seu)
+show.umap.heatmap <- generate.plotting.umap.heatmap(seu)
+
+snca.cols <- scale_color_manual(values=c(colors.genotype[2], colors.genotype[3]))
+
+p4c <- show.umap.categorical("genotype", point.size = 0.25) + snca.cols
+
+p4c
+
+ggsave("figures/fig4b.pdf", height=2.3, width=2.5)
+
+
+#+end_src
+
+#+RESULTS:
+: figures/fig4b.pdf
+
+
+
+#+begin_src R
+
+p4b <- show.umap.heatmap("SNCA", point.size = 0.25)
+
+ggsave("figures/fig4c.pdf", height=2.3, width=2.3)
+
+#+end_src
+
+#+RESULTS:
+: figures/fig4c.pdf
+
+
+** Violinplots for validation targets
+#+name: py_load_mono_unt
+#+begin_src python
+<<py_config>>
+
+sc.settings.figdir = './figures/ansari-day49/'
+ann_orig = sc.read('curated-objects/mono-unt-celltypes.h5ad')
+ann_model = ann_orig[(ann_orig.obs['genotype'] != 'KOLF2') & (ann_orig.obs['Cell Type'] == 'oDAn1')].copy()
+ann_orig = norm(ann_orig)
+ann = norm(ann_model)
+ann
+#+end_src
+
+#+RESULTS: py_load_mono_unt
+:RESULTS:
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1094: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if not is_categorical(df_full[k]):
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1097: FutureWarning: The `inplace` parameter in pandas.Categorical.remove_unused_categories is deprecated and will be removed in a future version.
+:   df_sub[k].cat.remove_unused_categories(inplace=True)
+: AnnData object with n_obs × n_vars = 2135 × 20584
+:     obs: 'cellline', 'coculture', 'condition', 'timepoint', 'genotype', 'souporcell_singlet', 'n_genes_by_counts', 'log1p_n_genes_by_counts', 'total_counts', 'log1p_total_counts', 'pct_counts_in_top_50_genes', 'pct_counts_in_top_100_genes', 'pct_counts_in_top_200_genes', 'pct_counts_in_top_500_genes', 'total_counts_mito', 'log1p_total_counts_mito', 'pct_counts_mito', 'scrublet_singlet', 'solo-doublet', 'batch', 'souporcell_genotype', 'culture_condition', 'treatment_condition', 'sample_name', 'total_counts_ribo', 'log1p_total_counts_ribo', 'pct_counts_ribo', '_scvi_batch', '_scvi_labels', 'X_scVI-louvain-0.5', 'celltype', 'Cell Type'
+:     var: 'gene_ids', 'feature_types', 'genome', 'mito', 'ribo', 'n_cells_by_counts-0', 'mean_counts-0', 'log1p_mean_counts-0', 'pct_dropout_by_counts-0', 'total_counts-0', 'log1p_total_counts-0', 'n_cells_by_counts-1', 'mean_counts-1', 'log1p_mean_counts-1', 'pct_dropout_by_counts-1', 'total_counts-1', 'log1p_total_counts-1', 'n_cells_by_counts-2', 'mean_counts-2', 'log1p_mean_counts-2', 'pct_dropout_by_counts-2', 'total_counts-2', 'log1p_total_counts-2', 'n_cells_by_counts-3', 'mean_counts-3', 'log1p_mean_counts-3', 'pct_dropout_by_counts-3', 'total_counts-3', 'log1p_total_counts-3', 'n_cells_by_counts-4', 'mean_counts-4', 'log1p_mean_counts-4', 'pct_dropout_by_counts-4', 'total_counts-4', 'log1p_total_counts-4', 'n_cells_by_counts-5', 'mean_counts-5', 'log1p_mean_counts-5', 'pct_dropout_by_counts-5', 'total_counts-5', 'log1p_total_counts-5', 'n_cells_by_counts-6', 'mean_counts-6', 'log1p_mean_counts-6', 'pct_dropout_by_counts-6', 'total_counts-6', 'log1p_total_counts-6', 'n_cells_by_counts-7', 'mean_counts-7', 'log1p_mean_counts-7', 'pct_dropout_by_counts-7', 'total_counts-7', 'log1p_total_counts-7', 'n_cells_by_counts-8', 'mean_counts-8', 'log1p_mean_counts-8', 'pct_dropout_by_counts-8', 'total_counts-8', 'log1p_total_counts-8', 'n_cells_by_counts-9', 'mean_counts-9', 'log1p_mean_counts-9', 'pct_dropout_by_counts-9', 'total_counts-9', 'log1p_total_counts-9', 'n_cells_by_counts', 'mean_counts', 'log1p_mean_counts', 'pct_dropout_by_counts', 'total_counts', 'log1p_total_counts'
+:     uns: '_scvi', 'louvain', 'neighbors', 'scVI_train_params', 'umap'
+:     obsm: 'X_scVI', 'X_umap', '_scvi_extra_categoricals', '_scvi_extra_continuous'
+:     layers: 'scvi_normalized', 'norm_counts', 'lognorm_counts'
+:     obsp: 'connectivities', 'distances'
+:END:
+
+#+RESULTS: load_mono_unt
+:RESULTS:
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1094: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if not is_categorical(df_full[k]):
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1097: FutureWarning: The `inplace` parameter in pandas.Categorical.remove_unused_categories is deprecated and will be removed in a future version.
+:   df_sub[k].cat.remove_unused_categories(inplace=True)
+: AnnData object with n_obs × n_vars = 2538 × 20584
+:     obs: 'cellline', 'coculture', 'condition', 'timepoint', 'genotype', 'souporcell_singlet', 'n_genes_by_counts', 'log1p_n_genes_by_counts', 'total_counts', 'log1p_total_counts', 'pct_counts_in_top_50_genes', 'pct_counts_in_top_100_genes', 'pct_counts_in_top_200_genes', 'pct_counts_in_top_500_genes', 'total_counts_mito', 'log1p_total_counts_mito', 'pct_counts_mito', 'scrublet_singlet', 'solo-doublet', 'batch', 'souporcell_genotype', 'culture_condition', 'treatment_condition', 'sample_name', 'total_counts_ribo', 'log1p_total_counts_ribo', 'pct_counts_ribo', '_scvi_batch', '_scvi_labels', 'X_scVI-louvain-0.5', 'celltype', 'Cell Type'
+:     var: 'gene_ids', 'feature_types', 'genome', 'mito', 'ribo', 'n_cells_by_counts-0', 'mean_counts-0', 'log1p_mean_counts-0', 'pct_dropout_by_counts-0', 'total_counts-0', 'log1p_total_counts-0', 'n_cells_by_counts-1', 'mean_counts-1', 'log1p_mean_counts-1', 'pct_dropout_by_counts-1', 'total_counts-1', 'log1p_total_counts-1', 'n_cells_by_counts-2', 'mean_counts-2', 'log1p_mean_counts-2', 'pct_dropout_by_counts-2', 'total_counts-2', 'log1p_total_counts-2', 'n_cells_by_counts-3', 'mean_counts-3', 'log1p_mean_counts-3', 'pct_dropout_by_counts-3', 'total_counts-3', 'log1p_total_counts-3', 'n_cells_by_counts-4', 'mean_counts-4', 'log1p_mean_counts-4', 'pct_dropout_by_counts-4', 'total_counts-4', 'log1p_total_counts-4', 'n_cells_by_counts-5', 'mean_counts-5', 'log1p_mean_counts-5', 'pct_dropout_by_counts-5', 'total_counts-5', 'log1p_total_counts-5', 'n_cells_by_counts-6', 'mean_counts-6', 'log1p_mean_counts-6', 'pct_dropout_by_counts-6', 'total_counts-6', 'log1p_total_counts-6', 'n_cells_by_counts-7', 'mean_counts-7', 'log1p_mean_counts-7', 'pct_dropout_by_counts-7', 'total_counts-7', 'log1p_total_counts-7', 'n_cells_by_counts-8', 'mean_counts-8', 'log1p_mean_counts-8', 'pct_dropout_by_counts-8', 'total_counts-8', 'log1p_total_counts-8', 'n_cells_by_counts-9', 'mean_counts-9', 'log1p_mean_counts-9', 'pct_dropout_by_counts-9', 'total_counts-9', 'log1p_total_counts-9', 'n_cells_by_counts', 'mean_counts', 'log1p_mean_counts', 'pct_dropout_by_counts', 'total_counts', 'log1p_total_counts'
+:     uns: '_scvi', 'louvain', 'neighbors', 'scVI_train_params', 'umap'
+:     obsm: 'X_scVI', 'X_umap', '_scvi_extra_categoricals', '_scvi_extra_continuous'
+:     layers: 'scvi_normalized', 'norm_counts', 'lognorm_counts'
+:     obsp: 'connectivities', 'distances'
+:END:
+
+#+name: SNCA_violin
+#+begin_src python
+
+f, ax  = plt.subplots(1, 1, figsize = (1.5, 1.5))
+hue = 'genotype'
+g = 'SNCA'
+plot_violin(ann_model, g, 'genotype', ax, orient = 'h', palette = my_colors['snca'])
+
+f.savefig('figures/fig4b.pdf')
+
+#+end_src
+
+
+#+name: SNCA_violin
+#+begin_src python
+
+f, ax  = plt.subplots(1, 1, figsize = (1.5, 1.5))
+hue = 'genotype'
+g = 'SNCA'
+plot_violin(ann_orig[(ann_orig.obs['genotype'] != 'KOLF2')], g, 'genotype', ax, orient = 'h', palette = my_colors['snca'])
+
+f.savefig('figures/sfig4-snca-culture.pdf')
+
+#+end_src
+
+#+RESULTS: SNCA_violin
+:RESULTS:
+#+begin_example
+/home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1094: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+  if not is_categorical(df_full[k]):
+/home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1097: FutureWarning: The `inplace` parameter in pandas.Categorical.remove_unused_categories is deprecated and will be removed in a future version.
+  df_sub[k].cat.remove_unused_categories(inplace=True)
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.82
+#+end_example
+#+attr_org: :width 170 :height 136
+[[file:./.ob-jupyter/1c9ca6a5d3fcb12300a68df0afddf97e5f40c338.png]]
+:END:
+#+begin_src python
+<<py_functions>>
+
+
+oxidative_phosphorylation = [
+    "ATP5PF","ATP5MG", "DGUOK",
+    "NDUFA1", "NDUFA2", "NDUFA4", "NDUFA6", "NDUFAB1", "NDUFB3", "NDUFB4", "NDUFB7", "NDUFC1", "NDUFC2", "NDUFS3",
+    "UQCRB", "UQCRH","UQCRQ", "UQCR10",
+    "COX5B", "COX6A1", "COX7C", "COX7A2L", "COX5A"]
+
+
+
+complex1 = ["NDUFA1", "NDUFA2", "NDUFA4", "NDUFA6", "NDUFAB1", "NDUFB3", "NDUFB4", "NDUFB7", "NDUFC1", "NDUFC2", "NDUFS3"]
+
+complex3 = ["UQCRB", "UQCRH","UQCRQ", "UQCR10"]
+cytochromec = ["COX5B", "COX6A1", "COX7C", "COX7A2L", "COX5A"]
+
+
+translation = [
+    "EIF4A1", "RPL21", "RPL23A", "RPL24", "RPL26", "RPL27", "RPL30",
+    "RPL27A", "RPL28", "RPL31", "RPL34", "RPL35A", "RPL37A", "RPL38",
+    "RPL39", "RPL41", "RPL36A", "RPLP1", "RPLP2", "RPS10", "RPS12",
+    "RPS13", "RPS15", "RPS15A", "RPS16", "RPS17", "RPS21", "RPS23",
+    "RPS25", "RPS26", "RPS27A", "RPS28", "UBA52", "RPL23", "RPL35",
+    "RPL36", "RPL22L1"
+]
+
+
+translation = ["EIF4A1", "EIF3E", "RPL24", "RPL27", "RPL34", "RPL35A",
+"RPL36AL", "RPL41", "RPL36A", "RPS17", "RPS21", "RPS25", "RPS26",
+"RPS27A", "SRP14", "RPL23", "MRPL33", "MRPL28", "SEC61B", "RPL35",
+"SEC61G", "RPL36", "MRPL51", "MRPS33", "MRPL36", "MRPL54", "CHCHD1"]
+
+ER_proteinfolding = ["HSPA5", "HSP90B1", "CANX","PDIA3"]
+
+stress = [
+    "ABL1","HIF1A","HSPA5","PAFAH1B1","MAPK1","PTPRS","TP53BP1",
+    "UBE2V1","DDX39B","PARG","TRIP12","LRIG2","HDAC6","HIPK3",
+    "HYOU1","KDM1A","SIRT1","MARCHF7","MAPKAP1","ITCH"]
+
+ubiquitination = [
+    "DDX3X","HSPA5","UBE2V1","CUL3","MALT1","GABARAP","KDM1A","DCUN1D4","MARCHF7"]
+
+# list(ann.var_names[ann.var_names.str.startswith("MT-")])
+
+mito = [
+    'MT-ND1', 'MT-ND2', 'MT-CO1', 'MT-CO2', 'MT-ATP8', 'MT-ATP6',
+    'MT-CO3', 'MT-ND3', 'MT-ND4L', 'MT-ND4', 'MT-ND5', 'MT-ND6', 'MT-CYB']
+
+mitochondria_perturbation = ["NDUFB3", "COX5B", "UQCRH", "MT-ND1", "MT-ND6"]
+translation_perturbation = ["EIF4A1", "CHCHD1", "MRPL54", "RPL23", "RPS25"]
+
+matplotlib.rc('text', usetex = False)
+param_dict = dict(sharey = True, orient = 'h', palette = my_colors["snca"])
+
+f = print_grid(ann_model, complex3, hue, title = 'Cytochrome C Reductase', **param_dict)
+f.savefig('figures/sfig4-1.pdf')
+
+f = print_grid(ann_model, complex1, hue, title = 'Ubiquinone Oxidoreductase', **param_dict)
+f.savefig('figures/sfig4-2.pdf')
+
+f = print_grid(ann_model, cytochromec, hue, title = 'Cytochrome C Oxidase', **param_dict)
+f.savefig('figures/sfig4-3.pdf')
+
+f = print_grid(ann_model, stress, hue, title = 'Cellular Response to Stress', **param_dict)
+f.savefig('figures/sfig4-4.pdf')
+
+translation.sort()
+f = print_grid(ann_model, translation, hue, title = 'Translation', **param_dict)
+f.savefig('figures/sfig4-5.pdf')
+
+f = print_grid(ann_model, mito, hue, title = 'Mitochondria genes', **param_dict)
+f.savefig('figures/sfig4-6.pdf')
+
+f = print_grid(ann_model, ["MOSPD2", "ARMCX6"], hue, title = 'dummy', **param_dict)
+f.savefig('figures/sfig4-7.pdf')
+
+f = print_grid(ann_model, ER_proteinfolding, hue, title = 'ER protein-folding', **param_dict)
+f.savefig('figures/fig4e-1.pdf')
+f = print_grid(ann_model, mitochondria_perturbation, hue, title = 'Oxidative Phosphorylation', **param_dict)
+f.savefig('figures/fig4e-2.pdf')
+f = print_grid(ann_model, translation_perturbation, hue, title = 'Traslation', **param_dict)
+f.savefig('figures/fig4e-3.pdf')
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+#+begin_example
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+UQCRB
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.53
+UQCRH
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.70
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+UQCRQ
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.59
+UQCR10
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.64
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+NDUFA1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.57
+NDUFA2
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.57
+NDUFA4
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.66
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+NDUFA6
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.56
+NDUFAB1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.61
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+NDUFB3
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.81
+NDUFB4
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.59
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+NDUFB7
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.69
+NDUFC1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.63
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+NDUFC2
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.69
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+COX5B
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.76
+COX6A1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.59
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+COX7C
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.71
+COX7A2L
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.43
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+COX5A
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.53
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+ABL1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.66
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+HIF1A
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.73
+HSPA5
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.16
+PAFAH1B1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.56
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MAPK1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.74
+PTPRS
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.39
+TP53BP1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.63
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+UBE2V1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.21
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+DDX39B
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.32
+PARG
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.97
+TRIP12
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.96
+LRIG2
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.92
+HDAC6
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.80
+HIPK3
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.02
+HYOU1
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.85
+KDM1A
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.77
+SIRT1
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.18
+MARCHF7
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.74
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MAPKAP1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.70
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+ITCH
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.14
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+CHCHD1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.53
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+EIF3E
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.50
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+EIF4A1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.78
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MRPL28
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.57
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MRPL33
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.62
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MRPL36
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.50
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MRPL51
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.53
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MRPL54
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.82
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MRPS33
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.59
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL23
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.85
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL24
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.64
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL27
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.76
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL34
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.71
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL35
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.67
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL35A
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.76
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL36
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.71
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL36A
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -1.06
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL36AL
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.84
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPL41
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.92
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPS17
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.97
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPS21
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.84
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPS25
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.85
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPS26
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.82
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPS27A
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.69
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+SEC61B
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.73
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-ND1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.09
+MT-ND2
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.15
+MT-CO1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.23
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-CO2
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.13
+MT-ATP8
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.08
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-ATP6
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.13
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-CO3
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.23
+MT-ND3
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.03
+MT-ND4L
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.98
+MT-ND4
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.06
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-ND5
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.75
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-ND6
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 2.10
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-CYB
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.19
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MOSPD2
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.74
+ARMCX6
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.94
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+HSPA5
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.16
+HSP90B1
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 1.02
+CANX
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.79
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+PDIA3
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.77
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+NDUFB3
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.81
+COX5B
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.76
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+UQCRH
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.70
+MT-ND1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 0.09
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MT-ND6
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: 2.10
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+EIF4A1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.78
+CHCHD1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.53
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+MRPL54
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.82
+RPL23
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.85
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+RPS25
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+SNCA-3x vs. SNCA-corr: -0.85
+#+end_example
+#+attr_org: :width 438 :height 118
+[[file:./.ob-jupyter/8cb5a3f6f6c70eedab41b967fed69e906b72f206.png]]
+#+attr_org: :width 437 :height 188
+[[file:./.ob-jupyter/b67de6a3b1ae4f5bf62af0cb3581c3eb5da68124.png]]
+#+attr_org: :width 437 :height 118
+[[file:./.ob-jupyter/5269073b5656132c5c6475965b0d70cd97094faa.png]]
+#+attr_org: :width 437 :height 329
+[[file:./.ob-jupyter/f0100c44bd916b2cf320ec517e384b5f0b8d5528.png]]
+#+attr_org: :width 437 :height 400
+[[file:./.ob-jupyter/9c5c05f76f122da9c0a44b2935bb6a6cfc1ad6bc.png]]
+#+attr_org: :width 437 :height 259
+[[file:./.ob-jupyter/c82742606bc8093ad2e7919336e6e13ee2400366.png]]
+#+attr_org: :width 438 :height 118
+[[file:./.ob-jupyter/232bce79e54df460236ceb1ad85158d69d8fb1b4.png]]
+#+attr_org: :width 438 :height 118
+[[file:./.ob-jupyter/8fb84027691bc1ef505d27684f910f5d83ea9560.png]]
+#+attr_org: :width 437 :height 118
+[[file:./.ob-jupyter/7b2a089775464efab17474507f7eb8706694ebaf.png]]
+#+attr_org: :width 437 :height 118
+[[file:./.ob-jupyter/071b6f39f3b7bab6af8e4d57d73353a1b6bb0d80.png]]
+:END:
+** Pathways
+#+begin_src python
+<<py_config>>
+trip_up = ["GO:0006259", "GO:0080135", "GO:0016567", "GO:0006974", "GO:0051129", "GO:0034975"]
+trip_down =  ["GO:0002181", "GO:0006119", "GO:0042773", "GO:0000398", "GO:0034470","GO:0006839"]
+
+pathway_file_up = "metascape_summaries/SNCA-3x-vs-SNCA-corr-up/Enrichment_GO/_FINAL_GO.csv"
+pathway_up = pd.read_csv(pathway_file_up, index_col = "GO")
+
+pathway_file_down = "metascape_summaries/SNCA-3x-vs-SNCA-corr-down/Enrichment_GO/_FINAL_GO.csv"
+pathway_down = pd.read_csv(pathway_file_down, index_col = "GO")
+
+#+end_src
+
+#+RESULTS:
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+
+#+begin_src python
+
+f = bar(pathway_up.loc[trip_up], "gene", color = '#AA1111', title = 'SNCA-3x upregulation', height = 2)
+f.savefig("figures/fig4h.pdf", bbox_inches="tight")
+
+f = bar(pathway_down.loc[trip_down], "gene", color = '#6666AA', title = "SNCA-3x downregulation", height = 2)
+f.savefig("figures/fig4i.pdf", bbox_inches="tight")
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+#+attr_org: :width 324 :height 178
+[[file:./.ob-jupyter/f533e7a5a141acf7b68ebc94f198e116a94311eb.png]]
+#+attr_org: :width 329 :height 178
+[[file:./.ob-jupyter/0e22f98795cee0ed98fd4265aca8c4b839f30244.png]]
+:END:
+
+
+* Figure 5 - Molecular deconvolution of oxidative stress response in oDAn1 neurons
+:PROPERTIES:
+:header-args:R: :session mDA-figure5*R* :async :noweb yes
+:header-args:python: :session mDA-figure5*python* :async yes :noweb yes 
+:END:
+
+** Depletion
+#+begin_src R
+<<init>>
+<<style>>
+res.copy <- read.csv('aux-files/MASC_mono-unt-rot-summary.csv')
+res.copy$cluster <- gsub('cluster','',res.copy$cluster)
+res.copy$cluster <- factor(res.copy$cluster, levels= celltype.level.order)
+ggplot(res.copy, aes(x = log2(conditionROT.OR) , y = reorder(cluster, -conditionROT.OR) , color = cluster, xmin = log2(conditionROT.OR.95pct.ci.lower), xmax = log2(conditionROT.OR.95pct.ci.upper))) +
+        geom_point(stat = "identity") + color.set +xlab("log2(OddsRatio)") + ylab("") +
+        geom_errorbar(width=.3) + my.theme + theme(
+                                               legend.position = "none",
+                                               plot.title = element_text(hjust=0.5, size = 6, family = my.font),
+                                               legend.key.size = unit(2, 'mm'),
+                                               axis.text.x = element_text(size=6, family = my.font),
+                                               axis.text.y = element_text(size=6, family = my.font)) + ggtitle("Rotenone vs untreated cell type proportion")
+
+ggsave('figures/fig5a.pdf', width = 3, height = 2)
+#+end_src
+
+#+RESULTS:
+: figures/fig5a.pdf
+
+** Pseudotime
+#+name: pseudotime_dan1_load
+#+begin_src R
+## seu <- readRDS('seurat-conversion/dan1-rot-pseudotime.rds')
+seu.treat <- readRDS('seurat-conversion/dan1-rot-pseudotime.rds')
+df <- seu.treat[[]]
+df$condition <- df$treatment_condition
+
+ggplot(df, aes(x= rotenone_pseudotime, fill = condition)) +
+  geom_histogram(alpha=0.5, position="identity", bins = 100) + my.theme  + xlab("Pseudotime") + ylab("Cells") + color.treatment.set.fit +
+  theme(
+    legend.position = c(0.8, 0.5)) + ggtitle("oDAn1 Neurons")
+ggsave('figures/fig5b.pdf', width = 3, height = 2)
+#+end_src
+
+#+RESULTS: pseudotime_dan1_load
+: figures/fig5b.pdf
+
+#+RESULTS:
+
+** Heatmap
+#+name: switchde_rot
+#+begin_src R
+
+<<init>>
+<<style>>
+<<pseudotime_dan1_load>>
+
+sde.unt <- readRDS("switchde-unt.rds")
+sde.rot <- readRDS("switchde-rot.rds")
+rot <- seu.treat[[]]$treatment_condition == "ROT"
+seu.unt <- seu.treat[,!rot]
+seu.unt <- ScaleData(seu.unt)
+seu.rot <- seu.treat[,rot]
+seu.rot <- ScaleData(seu.rot)
+
+
+#+end_src
+
+#+RESULTS: switchde_rot
+
+#+RESULTS:
+
+#+name: pseudotime_init
+#+begin_src R
+<<switchde_rot>>
+
+
+heatmap.pseudotime <- function(seu.arg, genes, color.map.base = "red", font.size= 9){
+  library(pheatmap)
+  library(RColorBrewer)
+  library(grid)
+  seu.active <- seu.arg
+  
+  X <- as.matrix(seu.active@assays$RNA@scale.data)
+  g <- !(genes %in% rownames(seu.active))
+  if(sum(g) != 0) {
+    stop(paste("Not found",genes[g]))
+  }
+  ## Correct gene order
+  X <- X[genes,]
+
+  my.order <- colnames(seu.active)[order(seu.active[[]][["rotenone_pseudotime"]])]
+  X <- X[, my.order]
+  
+  ## Apply some smoothing
+  X <- as.matrix(apply(X, 1, function(x){as.numeric(zoo::rollmean(x, k = 100))}))
+  breaksList = seq(-1, 1, by = 0.05)
+  ## colors = colorRampPalette(brewer.pal(n = 7, name = color.map.base))(length(breaksList))
+  colors = colorRampPalette(c(color.map.base,"white", "darkred"))(length(breaksList))
+  if(!is.null(dev.list())) dev.off()
+
+  
+  p <- pheatmap(t(X), cluster_rows = F, cluster_cols = F, show_colnames = F,
+           show_rownames = T, color = colors, breaks = breaksList)
+  dev.off()
+  p$gtable$grobs[[2]]$gp = gpar(fontsize = font.size, fontfamily = my.font, fontface = "italic")
+  ## cols = data[order(match(rownames(data), p$gtable$grobs[[5]]$label)), ]$colors  #Assuming row labels are in grob 5
+  ## p$gtable$grobs[[5]]$gp = gpar(col = cols, fontsize = 15, fontface = "bold")
+  p
+}
+
+sde.active <- sde.unt
+## gs.up <- sde.active %>% arrange(qval) %>% filter( k > 0) %>% slice_head(n = 15) 
+## gs.down <- sde.active %>% arrange(qval) %>% filter( k < 0) %>% slice_head(n = 15) 
+
+
+unt.up <-  c(
+  "ATP5MC2",
+  "ATP6V0E1",
+  "CDKN1A",
+  "ING4",
+  "MAD2L2",
+  "DIPK2A",
+  "H1-10",
+  "H3-3A",
+  "JUN",
+  "LMO4",
+  "PDLIM5",
+  "RPL10",
+  "RPS3",
+  "LMX1A",
+  "SHH",
+  "SOX2",
+  "TXNIP")
+
+
+unt.down <- c(
+              "ATP1A1",
+              "ATP5MC1",
+              "STMN2",
+              "SV2A",
+              "SNAP25",
+              "VAMP2",
+              "NEFL",
+              "NEFM",
+              "HMGCR",
+              "HMGCS1",
+              "SQLE",
+              "SNCA",
+              "ANK2",
+              "UCHL1",
+              "MAPT",
+              "SNAP91"
+)
+
+
+gs.up <- sde.active %>% filter(gene %in% unt.up) %>% arrange(qval)
+gs.down <- sde.active %>% filter(gene %in% unt.down) %>% arrange(qval)
+
+
+
+
+p1 <- heatmap.pseudotime(seu.unt, unt.up, color.map.base = "darkorange")
+svg("figures/fig5c-resilient.svg", width = 3, height = 2.2)
+p1
+dev.off()
+
+p1 <- heatmap.pseudotime(seu.unt, unt.down, color.map.base = "darkorange")
+svg("figures/fig5c-sensitive.svg", width = 3, height = 2.2)
+p1
+dev.off()
+
+
+sde.active <- sde.rot
+
+## gs.up <- sde.active %>% arrange(qval) %>% filter( k > 0) %>% slice_head(n = 15) 
+## gs.down <- sde.active %>% arrange(qval) %>% filter( k < 0) %>% slice_head(n = 15) 
+
+## rot.up <- c("BRD4", "TXNIP", "DDIT3", "DDIT4", "DNAJC9", "HSP90AA1", "HSPA6", "HSPB1", "GADD45A",
+##             "H3-3B", "HMGB2", "MDM2", "NOP53", "RPL5", "RPS9")
+
+## rot.down <- c("GPX4", "H1-10", "HMGB3", "ATP6V0B", "MT-ATP6", "MT-CO1",
+##               "MT-CYB", "MT-ND1", "NDUFA3", "NDUFC1", "MAP2", "MAPT", "NR4A2", "TP53BP1",
+##               "ELAVL4", "RTN4", "SNAP25")
+
+rot.up <- c(
+  "ATP6V0E1",
+  "DNAJB1",
+  "GADD45A",
+  "GADD45G",
+  "H3-3B",
+  "HMGB2",
+  "HSP90AA1",
+  "HSP90AB1",
+  "HSPA6",
+  "HSPB1",
+  "LMO3",
+  "RPL29",
+  "RPS2",
+  "RPS3",
+  "TUBB2B",
+  "TXNIP",
+  "VIM"
+)
+
+rot.down <- c(
+  "ANK2",
+  "ATP6V0A1",
+  "GSK3B",
+  "HLA-A",
+  "HMGCR",
+  "HMGCS1",
+  "MAP2",
+  "MT-ATP6",
+  "MT-CO3",
+  "MT-CYB",
+  "MT-ND1",
+  "MT-ND2",
+  "MT-ND3",
+  "MT-ND5",
+  "MT-ND6",
+  "NR4A2",
+  "TP53BP1"
+)
+
+## rot.down <- c("SHH", "GSK3B", "NDUFV3", "MT-ND1","MT-ATP6","MT-CO3","MT-CYB", "RTN4", "TP53BP1", "C1QL1", "SNAP25", "NR4A2", "MAPT", "MAP2", "H1-10", "ELAVL4")
+
+## gs.up <- sde.active %>% filter(gene %in% rot.up) %>% arrange(qval)
+## gs.down <- sde.active %>% filter(gene %in% rot.down) %>% arrange(qval) 
+
+
+
+p2 <- heatmap.pseudotime(seu.rot, c(rot.up), color.map.base = "darkslateblue")
+svg("figures/fig5d-up.svg", width = 3, height = 2)
+p2
+dev.off()
+
+p2 <- heatmap.pseudotime(seu.rot, c(rot.down), color.map.base = "darkslateblue")
+svg("figures/fig5d-down.svg", width = 3, height = 2)
+p2
+dev.off()
+
+
+#+end_src
+
+#+RESULTS: pseudotime_init
+: 1
+
+#+RESULTS:
+: 1
+
+
+#+begin_src R
+
+p3 <- heatmap.pseudotime(seu.unt, c("SNCA", "MAPT", "SQLE","HMGCR","VAMP2","SNAP25"), color.map.base = "darkslateblue")
+svg("figures/ecr-sensitive.svg", width = 3, height = 2.5)
+p3
+dev.off()
+
+#+end_src
+
+#+RESULTS:
+: 1
+
+** Genotype Rotenone effect
+
+Genotype, treatment boxplots
+
+#+begin_src R
+<<init>>
+<<style>>
+seu.treat <- readRDS('seurat-conversion/dan1-rot-pseudotime.rds')
+df <- seu.treat[[]]
+df$condition <- df$treatment_condition
+
+ggplot(subset(df), aes(x = condition, y= rotenone_pseudotime, fill = genotype)) +
+  geom_boxplot() + my.theme  + xlab("treatment") + ylab("Cells") + color.genotype.set.fit +
+  theme(legend.position = 'top', legend.key.size = unit(5, 'mm')) + ggtitle("Pseudotime score in different cell lines")
+
+ggsave('figures/sfig5b.pdf', width = 3.5, height = 3)
+
+#+end_src
+
+#+RESULTS:
+: figures/sfig5b.pdf
+
+
+
+** Pathways
+#+begin_src python
+<<py_config>>
+
+
+
+pathway_file = "metascape_summaries/switchde-unt-rot-collated/Enrichment_GO/_FINAL_GO.csv"
+
+# rot_up = ["R-HSA-2262752", "GO:0006986", "GO:0016071", "GO:0061077", "R-HSA-3371571", "GO:0006977"]
+
+rot_up = [
+    "GO:0032989",
+    "GO:0031175",
+    "GO:0019646",
+    "GO:0043242",
+"GO:1901879",
+"GO:0016482"
+]
+
+
+
+# rot_down = ["GO:0006120", "GO:0006119", "GO:0045333", "GO:0006754", "GO:0022900", "GO:0030178"]
+
+rot_down = [
+"GO:0002181",
+"GO:0006986",
+"GO:0031396",
+"GO:0016071",
+"GO:0032075",
+"GO:1902255"
+]
+
+# unt_up =  ["GO:0002181",
+#            "GO:0031400",
+#            "R-HSA-2559580",
+#            "GO:1901798",
+#            "GO:0051438",
+#            "GO:0006974",
+#            "GO:0071824"]
+
+unt_up=[
+    "GO:0002181",
+    "GO:0045165",
+    "GO:1901798",
+    "GO:0071542",
+    "GO:0042772",
+    "GO:0032435"
+]
+
+
+# unt_down =  ["GO:0140352",
+#              "GO:0099536",
+#              "R-HSA-191273",
+#              "GO:0009060",
+#              "GO:0048268",
+#              "GO:0007029"]
+
+
+unt_down = [
+    "GO:0099536",
+    "GO:0140352",
+    "GO:0006897",
+    "GO:0010506",
+    "GO:0006695",
+    "GO:0048268",
+    "GO:0034643"
+]
+
+
+pathways = pd.read_csv(pathway_file, index_col = "GO")
+
+#+end_src
+
+#+RESULTS:
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+
+
+#+begin_src python
+
+upreg_color = '#AA1111'
+downreg_color = '#6666AA'
+f = bar(pathways.loc[rot_up], "rotenone_up", color = downreg_color, title = 'oDAn1 Rotenone Response Downregulation')
+f.savefig("figures/fig5e.pdf", bbox_inches="tight")
+
+f = bar(pathways.loc[rot_down], "rotenone_down", color = upreg_color, title = 'oDAn1 Rotenone Response Upregulation')
+f.savefig("figures/fig5f.pdf", bbox_inches="tight")
+
+f = bar(pathways.loc[unt_down], "sensitive", color = upreg_color, title = 'Rotenone Sensitivity')
+f.savefig("figures/fig5g.pdf", bbox_inches="tight")
+
+f = bar(pathways.loc[unt_up], "resilient", color = downreg_color, title = 'Rotenone Resilience')
+f.savefig("figures/fig5h.pdf", bbox_inches="tight")
+
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: findfont: Font family ['Helvetica'] not found. Falling back to DejaVu Sans.
+: findfont: Font family ['Helvetica'] not found. Falling back to DejaVu Sans.
+: findfont: Font family ['Helvetica'] not found. Falling back to DejaVu Sans.
+#+attr_org: :width 328 :height 214
+[[file:./.ob-jupyter/a20c84806d78b98361f62fdbd74e4ea14165245e.png]]
+#+attr_org: :width 327 :height 214
+[[file:./.ob-jupyter/87f0894e7bf542a30ae08938c35b38a4aed2ff6b.png]]
+#+attr_org: :width 329 :height 214
+[[file:./.ob-jupyter/c6ac4aadc33dfb344410ee96ab129a7eda7bfb5b.png]]
+#+attr_org: :width 323 :height 214
+[[file:./.ob-jupyter/b78c4466eff460503e981083e79e84d603786dfa.png]]
+:END:
+
+
+
+
+
+
+
+
+
+* Supplementary Figure 5
+:PROPERTIES:
+:header-args:R: :session mDA-figure5*R* :async :noweb yes
+:header-args:python: :session mDA-figure5*python* :async yes :noweb yes 
+:END:
+#+begin_src python
+<<py_config>>
+
+ann = sc.read_h5ad('curated-objects/all-celltypes.h5ad')
+ann.obs['10x_sample'] = ann.obs[['genotype', 'cellline', 'coculture', 'condition']].apply(lambda x : "_".join(x), axis=1)
+groupby = '10x_sample'
+label = 'Cell Type'
+which_celltype = 'oDAn1'
+_data = ann.obs[ann.obs['coculture'] == "MONO"]
+bins = _data.groupby(groupby).size()
+
+## Create a sample of cells
+df = pd.DataFrame(_data.groupby(groupby).sample(bins.min()))
+
+_lbl = groupby + ' Proportion'
+
+prop_df = df.groupby([groupby,label]).size().groupby(level = 0).transform(lambda x : x / x.sum()).rename(_lbl).reset_index()
+
+
+prop_df['genotype'] = prop_df["10x_sample"].apply(lambda x : x.split("_")[0])
+prop_df['treatment'] = prop_df["10x_sample"].apply(lambda x : x.split("_")[3])
+
+
+prop_df["Sample %"] = prop_df[_lbl] * 100
+
+for which_celltype in prop_df[label].unique():
+    f, ax = plt.subplots(figsize = (2, 1.5))
+    subset = prop_df[prop_df[label] == which_celltype].copy()
+    subset['treatment'] = subset['treatment'].astype('category').cat.reorder_categories(["UNT", "ROT"])
+    s = sns.barplot(data=subset, x='genotype',
+        y="Sample %",
+        ## weights=plot_label,
+        hue='treatment',
+        ax = ax
+        #multiple='stack',
+        #shrink=0.8
+    )
+    ax.legend(bbox_to_anchor= (1,0.6))
+    ax.set_title(which_celltype + " proportion")
+    f.savefig("figures/sfig5-rot-" + which_celltype + '.pdf', bbox_inches = 'tight')
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+#+attr_org: :width 212 :height 148
+[[file:./.ob-jupyter/8af15e2f4b0d6e998ee3e1fe247f99b7b2bb2302.png]]
+#+attr_org: :width 217 :height 148
+[[file:./.ob-jupyter/8c0292e4f3e7862ab7ee64df165f494955cc33cf.png]]
+#+attr_org: :width 167 :height 148
+[[file:./.ob-jupyter/bb1574a7d2a2fda6eb2378d743a89cf2baedcb1f.png]]
+#+attr_org: :width 167 :height 148
+[[file:./.ob-jupyter/3b2009108e0f93c046acac59a9d62c3ba1dc9a81.png]]
+#+attr_org: :width 171 :height 148
+[[file:./.ob-jupyter/5fe212933d75e75cf56c6c1d0dc8834311ba1254.png]]
+#+attr_org: :width 178 :height 148
+[[file:./.ob-jupyter/a462ac5197212c275757dbf7eac011335b924371.png]]
+#+attr_org: :width 217 :height 148
+[[file:./.ob-jupyter/9fa920872e02ba6ce4d60d8827f5ebba3b91a4f6.png]]
+#+attr_org: :width 217 :height 148
+[[file:./.ob-jupyter/a05c1550b0474f720d549b45328a4e7c67c91b85.png]]
+#+attr_org: :width 217 :height 148
+[[file:./.ob-jupyter/b1bba9ed19979bca5faffca30211ce007728eb99.png]]
+:END:
+
+
+#+begin_src R
+
+mito = c('MT-ND1', 'MT-ND2', 'MT-CO1', 'MT-CO2', 'MT-ATP8', 'MT-ATP6',
+ 'MT-CO3', 'MT-ND3', 'MT-ND4L', 'MT-ND4', 'MT-ND5', 'MT-ND6',
+ 'MT-CYB')
+
+Q10 = c("NDUFA1","NDUFA2","NDUFA4","NDUFA6", "NDUFAB1", "NDUFB3", "NDUFB7", "NDUFC2", "NDUFS6")
+cytochromec = c("COX5B", "COX6A1", "COX7C", "COX7A2L", "COX5A")
+complex3 = c("UQCRB","UQCRH","UQCR11","UQCRQ","UQCR10")
+
+p2 <- heatmap.pseudotime(seu.rot, c(mito, Q10,cytochromec,complex3), color.map.base = "darkslateblue", font.size = 10)
+svg("figures/sfig5d.svg", width = 3, height = 4)
+p2
+dev.off()
+
+#+end_src
+
+#+RESULTS:
+: 1
+
+
+#+begin_src R
+gc()
+seu <-readRDS('seurat-conversion/all.rds')
+Idents(seu) <- factor(Idents(seu), levels = celltype.level.order)
+seu[["Cell.Type"]] <- Idents(seu)
+seu.rot <- seu[,rownames(subset(seu[[]], coculture %in% c("MONO")))]
+seu.rot.unt <- seu[,rownames(subset(seu[[]], (coculture %in% c("MONO")) & (condition == "UNT")))]
+gc()
+
+show.umap.categorical <- generate.plotting.umap.categorical(seu.rot)
+show.umap.heatmap <- generate.plotting.umap.heatmap(seu.rot)
+show.umap.categorical.unt <- generate.plotting.umap.categorical(seu.rot.unt)
+show.umap.heatmap.unt <- generate.plotting.umap.heatmap(seu.rot.unt)
+
+#+end_src
+
+#+RESULTS:
+
+#+begin_src R
+
+p.ct <- show.umap.categorical("Cell.Type") + ggtitle("")
+p.tr <- show.umap.categorical("condition") + scale_color_manual(values = colors.treatment) + ggtitle("")
+
+p.ct + p.tr + plot_layout(ncol = 1)
+ggsave("figures/sfig5a.pdf", height = 5, width = 3)
+#+end_src
+
+#+RESULTS:
+: figures/sfig5a.pdf
+
+#+begin_src R
+
+sig.syn <- c("SQLE", "HMGCR", "SNCA", "SV2A")
+plot.gene.list.umap(seu.unt, sig.syn, "figures/sfig5e.pdf", show.umap.heatmap.unt, nrows = 2)
+
+#+end_src
+
+
+
+#+begin_src R
+
+## sig <- c("DPF1", "ATP6V0B", "PRKAR2B", "NSG2", "DGKD", "B4GAT1",
+##          "DIPK1B", "RAB6B", "RAP1GDS1")
+sig <- c("PPP2R2B",
+         "CISD1",
+         "HRAS",
+         "PTS",
+         "SYT5",
+         "DIPK1B",
+         "MRPL34",
+         "EPB41L1")
+
+p2 <- heatmap.pseudotime(seu.unt, sig, color.map.base = "darkorange",  font.size = 10)
+
+svg("figures/sfig5f.svg", width = 3, height = 2)
+p2
+dev.off()
+#+end_src
+
+#+RESULTS:
+: 1
+
+#+begin_src R
+plot.gene.list.umap(seu.unt, sig, "figures/sfig5g.pdf", show.umap.heatmap.unt, nrows = 2)
+
+#+end_src
+
+#+RESULTS:
+
+
+
+* Figure 6 - Establishing chimeras using mDA organoids
+
+
+#+begin_src R
+<<init>>
+<<style>>
+seu <-readRDS('seurat-conversion/all.rds')
+## seu <- seu[,rownames(subset(seu[[]], genotype %in% c("SNCA-3x", "SNCA-corr")))]
+
+    
+Idents(seu) <- factor(Idents(seu), levels = celltype.level.order)
+seu[["Cell.Type"]] <- Idents(seu)
+
+
+show.umap.categorical <- generate.plotting.umap.categorical(seu)
+show.umap.heatmap <- generate.plotting.umap.heatmap(seu)
+
+
+#+end_src
+
+#+RESULTS:
+
+
+
+#+begin_src R
+
+base.plot <- show.umap.categorical("Cell.Type", show.legend = F, point.size = 0.2)
+umap <- base.plot$data
+ct.centers <- umap %>% group_by(Cell.Type) %>% summarize(UMAP1 = mean(UMAP_1), UMAP2 = mean(UMAP_2))
+
+p1 <- base.plot + color.set + 
+  geom_label(aes(x=UMAP1, y=UMAP2, label = Cell.Type), colour = "black", alpha = 0.55,  ct.centers, size = 2, family= my.font) + umap.axis + ggtitle("")
+ggsave("figures/fig6a.pdf", width = 2.8, height = 2.8)
+
+#+end_src
+
+#+RESULTS:
+: figures/fig6a.pdf
+
+#+begin_src R
+<<init>>
+<<style>>
+
+res.copy <- read.csv('aux-files/MASC_summary-mosaic-PD.csv')
+res.copy$cluster <- gsub('cluster','',res.copy$cluster)
+res.copy$cluster <- factor(res.copy$cluster, levels= celltype.level.order)
+p <- ggplot(res.copy, aes(x = log2(conditionROT.OR) , y = reorder(cluster, -conditionROT.OR) , color = cluster, xmin = log2(conditionROT.OR.95pct.ci.lower), xmax = log2(conditionROT.OR.95pct.ci.upper))) +
+        geom_point(stat = "identity") + color.set +xlab("log2(OddsRatio)") + ylab("") +
+        geom_errorbar(width=.3) + my.theme + theme(
+                                               legend.position = "none",
+                                               plot.title = element_text(hjust=0.5, size = 6, family = my.font),
+                                               legend.key.size = unit(2, 'mm'),
+                                               axis.text.x = element_text(size=6, family = my.font),
+                                               axis.text.y = element_text(size=6, family = my.font)) + ggtitle("SNCA-3x+KOLF2 rotenone effect")
+
+ggsave('figures/fig6e.pdf', width = 3, height = 2)
+
+res.copy <- read.csv('aux-files/MASC_summary-mosaic-PD-corr.csv')
+res.copy$cluster <- gsub('cluster','',res.copy$cluster)
+res.copy$cluster <- factor(res.copy$cluster, levels = celltype.level.order)
+p <- ggplot(res.copy, aes(x = log2(conditionROT.OR) , y = reorder(cluster, -conditionROT.OR) , color = cluster, xmin = log2(conditionROT.OR.95pct.ci.lower), xmax = log2(conditionROT.OR.95pct.ci.upper))) +
+        geom_point(stat = "identity") + color.set +xlab("log2(OddsRatio)") + ylab("") +
+        geom_errorbar(width=.3) + my.theme + theme(
+                                               legend.position = "none",
+                                               plot.title = element_text(hjust=0.5, size = 6, family = my.font),
+                                               legend.key.size = unit(2, 'mm'),
+                                               axis.text.x = element_text(size=6, family = my.font),
+                                               axis.text.y = element_text(size=6, family = my.font)) + ggtitle("SNCA-corr+KOLF2 rotenone effect")
+
+ggsave('figures/fig6f.pdf', width = 3, height = 2)
+
+#+end_src
+
+#+RESULTS:
+: figures/fig6f.pdf
+
+
+
+
+#+begin_src R
+<<init>>
+<<style>>
+library(dplyr)
+all <- read.csv('aux-files/all-metadata.csv')
+mosaics <- all %>% filter(coculture == "MOSAIC")
+mosaics$Cell.Type <- factor(mosaics$Cell.Type, levels = celltype.level.order)
+
+#+end_src
+
+#+RESULTS:
+
+
+#+begin_src R :colnames yes
+with(mosaics, table(genotype, Cell.Type, cellline, condition))
+
+#+end_src
+
+#+RESULTS:
+| genotype  | Cell.Type | cellline | condition | Freq |
+|-----------+-----------+----------+-----------+------|
+| KOLF2     | oDAn1     | SNCA3x   | ROT       |   85 |
+| SNCA-3x   | oDAn1     | SNCA3x   | ROT       |   29 |
+| SNCA-corr | oDAn1     | SNCA3x   | ROT       |    0 |
+| KOLF2     | oDAn2     | SNCA3x   | ROT       |  649 |
+| SNCA-3x   | oDAn2     | SNCA3x   | ROT       |    7 |
+| SNCA-corr | oDAn2     | SNCA3x   | ROT       |    0 |
+| KOLF2     | oDAn3     | SNCA3x   | ROT       | 3180 |
+| SNCA-3x   | oDAn3     | SNCA3x   | ROT       |  612 |
+| SNCA-corr | oDAn3     | SNCA3x   | ROT       |    0 |
+| KOLF2     | FPP       | SNCA3x   | ROT       |  197 |
+| SNCA-3x   | FPP       | SNCA3x   | ROT       |  108 |
+| SNCA-corr | FPP       | SNCA3x   | ROT       |    0 |
+| KOLF2     | NS1       | SNCA3x   | ROT       |  757 |
+| SNCA-3x   | NS1       | SNCA3x   | ROT       |   20 |
+| SNCA-corr | NS1       | SNCA3x   | ROT       |    0 |
+| KOLF2     | NS2       | SNCA3x   | ROT       | 2872 |
+| SNCA-3x   | NS2       | SNCA3x   | ROT       |  180 |
+| SNCA-corr | NS2       | SNCA3x   | ROT       |    0 |
+| KOLF2     | NEU1      | SNCA3x   | ROT       |  183 |
+| SNCA-3x   | NEU1      | SNCA3x   | ROT       |    0 |
+| SNCA-corr | NEU1      | SNCA3x   | ROT       |    0 |
+| KOLF2     | NEU2      | SNCA3x   | ROT       |  533 |
+| SNCA-3x   | NEU2      | SNCA3x   | ROT       |   29 |
+| SNCA-corr | NEU2      | SNCA3x   | ROT       |    0 |
+| KOLF2     | EPI       | SNCA3x   | ROT       |   50 |
+| SNCA-3x   | EPI       | SNCA3x   | ROT       |   97 |
+| SNCA-corr | EPI       | SNCA3x   | ROT       |    0 |
+| KOLF2     | oDAn1     | SNCAWT   | ROT       |  232 |
+| SNCA-3x   | oDAn1     | SNCAWT   | ROT       |    0 |
+| SNCA-corr | oDAn1     | SNCAWT   | ROT       |   59 |
+| KOLF2     | oDAn2     | SNCAWT   | ROT       | 1214 |
+| SNCA-3x   | oDAn2     | SNCAWT   | ROT       |    0 |
+| SNCA-corr | oDAn2     | SNCAWT   | ROT       |   35 |
+| KOLF2     | oDAn3     | SNCAWT   | ROT       | 1969 |
+| SNCA-3x   | oDAn3     | SNCAWT   | ROT       |    0 |
+| SNCA-corr | oDAn3     | SNCAWT   | ROT       |  309 |
+| KOLF2     | FPP       | SNCAWT   | ROT       |  274 |
+| SNCA-3x   | FPP       | SNCAWT   | ROT       |    0 |
+| SNCA-corr | FPP       | SNCAWT   | ROT       |   67 |
+| KOLF2     | NS1       | SNCAWT   | ROT       | 1956 |
+| SNCA-3x   | NS1       | SNCAWT   | ROT       |    0 |
+| SNCA-corr | NS1       | SNCAWT   | ROT       |   17 |
+| KOLF2     | NS2       | SNCAWT   | ROT       | 1135 |
+| SNCA-3x   | NS2       | SNCAWT   | ROT       |    0 |
+| SNCA-corr | NS2       | SNCAWT   | ROT       |   10 |
+| KOLF2     | NEU1      | SNCAWT   | ROT       |  390 |
+| SNCA-3x   | NEU1      | SNCAWT   | ROT       |    0 |
+| SNCA-corr | NEU1      | SNCAWT   | ROT       |    9 |
+| KOLF2     | NEU2      | SNCAWT   | ROT       |   28 |
+| SNCA-3x   | NEU2      | SNCAWT   | ROT       |    0 |
+| SNCA-corr | NEU2      | SNCAWT   | ROT       |    4 |
+| KOLF2     | EPI       | SNCAWT   | ROT       |  132 |
+| SNCA-3x   | EPI       | SNCAWT   | ROT       |    0 |
+| SNCA-corr | EPI       | SNCAWT   | ROT       |  143 |
+| KOLF2     | oDAn1     | SNCA3x   | UNT       |  375 |
+| SNCA-3x   | oDAn1     | SNCA3x   | UNT       |  266 |
+| SNCA-corr | oDAn1     | SNCA3x   | UNT       |    0 |
+| KOLF2     | oDAn2     | SNCA3x   | UNT       |  307 |
+| SNCA-3x   | oDAn2     | SNCA3x   | UNT       |  385 |
+| SNCA-corr | oDAn2     | SNCA3x   | UNT       |    0 |
+| KOLF2     | oDAn3     | SNCA3x   | UNT       | 2723 |
+| SNCA-3x   | oDAn3     | SNCA3x   | UNT       | 1362 |
+| SNCA-corr | oDAn3     | SNCA3x   | UNT       |    0 |
+| KOLF2     | FPP       | SNCA3x   | UNT       |  192 |
+| SNCA-3x   | FPP       | SNCA3x   | UNT       |  141 |
+| SNCA-corr | FPP       | SNCA3x   | UNT       |    0 |
+| KOLF2     | NS1       | SNCA3x   | UNT       |  349 |
+| SNCA-3x   | NS1       | SNCA3x   | UNT       |  213 |
+| SNCA-corr | NS1       | SNCA3x   | UNT       |    0 |
+| KOLF2     | NS2       | SNCA3x   | UNT       |  381 |
+| SNCA-3x   | NS2       | SNCA3x   | UNT       |  261 |
+| SNCA-corr | NS2       | SNCA3x   | UNT       |    0 |
+| KOLF2     | NEU1      | SNCA3x   | UNT       |  164 |
+| SNCA-3x   | NEU1      | SNCA3x   | UNT       |   16 |
+| SNCA-corr | NEU1      | SNCA3x   | UNT       |    0 |
+| KOLF2     | NEU2      | SNCA3x   | UNT       |  138 |
+| SNCA-3x   | NEU2      | SNCA3x   | UNT       |   29 |
+| SNCA-corr | NEU2      | SNCA3x   | UNT       |    0 |
+| KOLF2     | EPI       | SNCA3x   | UNT       |   85 |
+| SNCA-3x   | EPI       | SNCA3x   | UNT       |  128 |
+| SNCA-corr | EPI       | SNCA3x   | UNT       |    0 |
+| KOLF2     | oDAn1     | SNCAWT   | UNT       |  867 |
+| SNCA-3x   | oDAn1     | SNCAWT   | UNT       |    0 |
+| SNCA-corr | oDAn1     | SNCAWT   | UNT       |  116 |
+| KOLF2     | oDAn2     | SNCAWT   | UNT       |  986 |
+| SNCA-3x   | oDAn2     | SNCAWT   | UNT       |    0 |
+| SNCA-corr | oDAn2     | SNCAWT   | UNT       |   46 |
+| KOLF2     | oDAn3     | SNCAWT   | UNT       | 1596 |
+| SNCA-3x   | oDAn3     | SNCAWT   | UNT       |    0 |
+| SNCA-corr | oDAn3     | SNCAWT   | UNT       |  241 |
+| KOLF2     | FPP       | SNCAWT   | UNT       |  459 |
+| SNCA-3x   | FPP       | SNCAWT   | UNT       |    0 |
+| SNCA-corr | FPP       | SNCAWT   | UNT       |   97 |
+| KOLF2     | NS1       | SNCAWT   | UNT       | 2078 |
+| SNCA-3x   | NS1       | SNCAWT   | UNT       |    0 |
+| SNCA-corr | NS1       | SNCAWT   | UNT       |   57 |
+| KOLF2     | NS2       | SNCAWT   | UNT       |  835 |
+| SNCA-3x   | NS2       | SNCAWT   | UNT       |    0 |
+| SNCA-corr | NS2       | SNCAWT   | UNT       |   13 |
+| KOLF2     | NEU1      | SNCAWT   | UNT       |  150 |
+| SNCA-3x   | NEU1      | SNCAWT   | UNT       |    0 |
+| SNCA-corr | NEU1      | SNCAWT   | UNT       |    1 |
+| KOLF2     | NEU2      | SNCAWT   | UNT       |  272 |
+| SNCA-3x   | NEU2      | SNCAWT   | UNT       |    0 |
+| SNCA-corr | NEU2      | SNCAWT   | UNT       |   14 |
+| KOLF2     | EPI       | SNCAWT   | UNT       |  485 |
+| SNCA-3x   | EPI       | SNCAWT   | UNT       |    0 |
+| SNCA-corr | EPI       | SNCAWT   | UNT       |  125 |
+
+, , cellline = SNCA3x, condition = UNT
+
+           Cell.Type
+genotype    oDAn1 oDAn2 oDAn3  FPP  NS1  NS2 NEU1 NEU2  EPI
+  KOLF2      1010   307  2088  192  349  381  164  138   85
+  SNCA-3x     529   385  1099  141  213  261   16   29  128
+  SNCA-corr     0     0     0    0    0    0    0    0    0
+  
+, , cellline = SNCA3x, condition = ROT
+
+           Cell.Type
+genotype    oDAn1 oDAn2 oDAn3  FPP  NS1  NS2 NEU1 NEU2  EPI
+  KOLF2       446   649  2819  197  757 2872  183  533   50
+  SNCA-3x      57     7   584  108   20  180    0   29   97
+  SNCA-corr     0     0     0    0    0    0    0    0    0
+
+
+, , cellline = SNCAWT, condition = UNT
+
+           Cell.Type
+genotype    oDAn1 oDAn2 oDAn3  FPP  NS1  NS2 NEU1 NEU2  EPI
+  KOLF2      1147   986  1316  459 2078  835  150  272  485
+  SNCA-3x       0     0     0    0    0    0    0    0    0
+  SNCA-corr   133    46   224   97   57   13    1   14  125
+
+  
+, , cellline = SNCAWT, condition = ROT
+
+           Cell.Type
+genotype    oDAn1 oDAn2 oDAn3  FPP  NS1  NS2 NEU1 NEU2  EPI
+  KOLF2       553  1214  1648  274 1956 1135  390   28  132
+  SNCA-3x       0     0     0    0    0    0    0    0    0
+  SNCA-corr    87    35   281   67   17   10    9    4  143
+
+
+
+
+
+
+#+begin_src R :colnames yes
+
+<<style>>
+genotypes <- mosaics %>% group_by(cellline, condition, genotype) %>% summarize(n = n()) %>% mutate(freq = round(n / sum(n)*100, 2) )
+
+genotypes$cellline[genotypes$cellline == "SNCA3x"] <- "SNCA-3x"
+genotypes$cellline[genotypes$cellline == "SNCAWT"] <- "SNCA-corr"
+genotypes$case <- with(genotypes, paste0(cellline,"+KOLF2", "\n" ,condition))
+
+
+fig6a <- ggplot(genotypes, aes(fill=genotype, y=n, x=case)) + my.theme + color.genotype.set.fit + coord_flip() + 
+  geom_bar(position="stack", stat="identity") + ggtitle("Chimera Recovered Genotypes") + ylab("Cells") + xlab("Chimera Sample") + theme(
+    legend.position = "top")
+ggsave("figures/fig6-cells.pdf", height = 2, width = 3, units = "in")
+fig6a
+#+end_src
+
+#+RESULTS:
+|---|
+
+#+begin_src R :colnames yes
+library(scales)
+cell.types <- mosaics %>% group_by(cellline, condition, genotype) %>% sample_n(10000, replace = T)
+cell.types <- cell.types %>% group_by(cellline, condition, genotype, Cell.Type)  %>% summarize(n = n()) %>% mutate(freq = round(n / sum(n)*100, 2) )
+
+
+snca.corr.cols <- scale_fill_manual(values=c(colors.genotype[1], colors.genotype[3]))
+
+theme.tmp <- list(theme(
+  legend.position = "top", axis.text.x = element_text(angle = 90)), ylab(""), xlab(""), scale_y_continuous(labels=scales::percent))
+
+
+fig6b1 <- ggplot(cell.types %>% filter((cellline == "SNCA3x") & (condition == "UNT")), aes(fill=genotype, y=n, x=Cell.Type)) + color.genotype.set.fit + my.theme +  
+  geom_bar(position="fill", stat="identity") + ggtitle("SNCA-3x + KOLF2 Chimera Untreated") + theme.tmp
+
+fig6b2 <- ggplot(cell.types %>% filter((cellline == "SNCAWT") & (condition == "UNT")), aes(fill=genotype, y=n, x=Cell.Type)) + snca.corr.cols + my.theme +  
+  geom_bar(position="fill", stat="identity") + ggtitle("SNCA-corr + KOLF2 Chimera Untreated") + theme.tmp
+
+fig6b3 <- ggplot(cell.types %>% filter((cellline == "SNCA3x") & (condition == "ROT")), aes(fill=genotype, y=n, x=Cell.Type)) + color.genotype.set.fit + my.theme +  
+  geom_bar(position="fill", stat="identity") + ggtitle("SNCA-3x + KOLF2 Chimera Rotenone") + theme.tmp
+
+fig6b4 <- ggplot(cell.types %>% filter((cellline == "SNCAWT") & (condition == "ROT")), aes(fill=genotype, y=n, x=Cell.Type)) + snca.corr.cols + my.theme +  
+  geom_bar(position="fill", stat="identity") + ggtitle("SNCA-corr + KOLF2 Chimera Rotenone") + theme.tmp
+
+
+fig6b <- fig6b1 + fig6b3
+
+ggsave("figures/fig6-genotype-cell-type-SNCA-3x.pdf", height = 2, width = 4, units = "in")
+
+fig6c <- fig6b2 + fig6b4
+ggsave("figures/fig6-genotype-cell-type-SNCA-corr.pdf", height = 2, width = 4, units = "in")
+
+#+end_src
+
+#+RESULTS:
+| x                                             |
+|-----------------------------------------------|
+| figures/fig6-genotype-cell-type-SNCA-corr.pdf |
+
+** Cartoon
+
+** Cell population
+
+
+
+** Pathways modulated in chimeras
+
+** Violin plots
+
+
+
+* Supplementary Figure 2
+** Pie chart for different cell lines
+#+name: sf2B
+#+begin_src R
+
+umap$genotype <- seu$genotype
+
+cells.in.clusters <- umap %>% group_by(genotype, Cell.Type) %>% summarize(cells = n())
+plots <- list()
+for( ct in c("KOLF2","SNCA-3x", "SNCA-corr"))
+{
+
+  data <- subset(cells.in.clusters, genotype == ct) %>% 
+  arrange(desc(cells)) %>%
+  mutate(prop = sum(cells) - cumsum(cells) + 0.5*cells, perc = paste0(as.character(as.integer(cells/sum(cells)*100)), "%"))
+
+  data$Cell.Type <- factor(data$Cell.Type, levels = data$Cell.Type)
+  cpalette <- colors[match(as.character(data$Cell.Type),celltype.level.order)]
+
+  plots[[ct]] <- ggplot(data, aes(x="", y=-cells, fill=Cell.Type)) + 
+    geom_bar(stat="identity", width=0.8, color="white") +   scale_fill_manual(values = cpalette) +
+    coord_polar("y", start=22) + geom_col(color = "black") + theme_void() + 
+    theme(legend.position="none",axis.text = element_blank(),axis.line = element_blank(),axis.ticks = element_blank()) + xlab("") + ylab("") +
+    geom_text(aes(y=-prop, label = perc, color = Cell.Type), x=1.6, alpha = 0.9, size =2.5, family = my.font, check_overlap = T) +  scale_colour_manual(values=cpalette) +
+    geom_text(aes(y=-prop, label = Cell.Type), x=1.2, color = "white", alpha = 0.9, size = 2,  check_overlap = T, family = my.font) + ggtitle(ct)
+}
+
+sfig2b <- Reduce("+",plots) + plot_layout(nrow = 1)
+#+end_src
+
+#+RESULTS:
+
+** UMAPs for glia cells
+#+begin_src R
+
+astro <- c("S100B", "GFAP", "ALDH1L1")
+plot.gene.list.umap(astro, "figures/sfig2e-1.pdf", nrows = 2)
+#+end_src
+
+#+RESULTS:
+: figures/sfig2e-1.pdf
+
+#+begin_src R
+oligo <- c("OLIG1", "OLIG2", "CLDN11", "MBP", "MOG", "SOX10")
+
+
+
+plot.gene.list.umap(oligo, "figures/sfig2e-2.pdf", nrows = 2)
+#+end_src
+
+#+RESULTS:
+: figures/sfig2e-2.pdf
+
+** Marker genes
+#+begin_src R
+
+plots <- lapply(genes,show.umap)
+
+p5 <- Reduce("+",plots) + plot_layout(nrow = 1)
+
+
+supp = c("GBX2", "GAD1", "OTX2", "SLC17A6", "TFAP2B", "POU4F1")
+
+#+end_src
+
+#+begin_src R
+vsc = c("CLIC6", "TTR", "HTR2C", "SULT1E1", "PLS3", "CA2", "RBM47",
+"MITF",
+"GBP1",
+"ALDH1A1",
+"COL1A2",
+"IBSP",
+"CA4",
+"RAX",
+"TRPM3",
+"RPE65",
+"GPC3",
+"DRD4",
+"DMRT3")
+#+end_src
+
+#+begin_src R
+
+#+end_src
+
+
+** TH percentages
+#+begin_src python
+<<py_config>>
+ansari = sc.read('curated-objects/mono-unt-celltypes.h5ad')
+ansari.obs['TH+'] = (ansari[:, ansari.var_names == 'TH'].X.A > 0)
+ct_factor_order = ['oDAn1', 'oDAn2', 'oDAn3', 'FPP', 'NS1', 'NS2', 'NEU1', 'NEU2', 'EPI']
+ansari.obs['Cell Type'] = ansari.obs['Cell Type'].cat.reorder_categories(ct_factor_order)
+df = ansari.obs
+# df['TH+'] /
+
+TH_percentages = df.groupby(['Cell Type'])['TH+'].agg(lambda x : x.sum() / len(x))
+
+import matplotlib.pyplot as plt
+plt.style.context('dark_background')
+
+
+fig, axs = plt.subplots(1,1, figsize=(2.5,1.5))
+
+ax = axs
+cts = list(TH_percentages.index)
+ax.bar(cts, TH_percentages.values , color = sns.color_palette())
+# ax.set_title('TH% per cell type')
+
+ax.set_xticklabels(cts, rotation = 90)
+# ax.yaxis.set_label('TH+')
+# ax.yaxis.set_units('%')
+yticks = [.05,.15,.25,.35]
+ax.set_ylabel('TH+ cells')
+# ax.yaxis.set_label(size = )
+ax.yaxis.set_ticks( yticks)
+ax.set_yticklabels(['{:.0%}'.format(x) for x in yticks])
+
+# Hide the right and top spines
+ax.spines.right.set_visible(False)
+ax.spines.top.set_visible(False)
+
+# Only show ticks on the left and bottom spines
+ax.yaxis.set_ticks_position('left')
+ax.xaxis.set_ticks_position('bottom')
+fig.tight_layout()
+fig.savefig('figures/sfig2c.pdf')
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: /usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1094: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if not is_categorical(df_full[k]):
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1097: FutureWarning: The `inplace` parameter in pandas.Categorical.remove_unused_categories is deprecated and will be removed in a future version.
+:   df_sub[k].cat.remove_unused_categories(inplace=True)
+: <ipython-input-6-81c37beb880c>:312: UserWarning: FixedFormatter should only be used together with FixedLocator
+:   ax.set_xticklabels(cts, rotation = 90)
+#+attr_org: :width 197 :height 118
+[[file:./.ob-jupyter/977caae620b49e74bc8c2f7dc8a14388b9fed990.png]]
+:END:
+
+** Pathway analysis
+
+* sFigure 4
+** genes
+
+* Other
+#+begin_src python
+<<py_config>>
+def print_grid(ann_model, genes, hue, title = None, sharey= False, sharex = False, **violin_args):
+    import matplotlib.pyplot as plt
+    panels_per_row = min(5, len(genes))
+    nrow = int(len(genes)/ (panels_per_row + 1)) + 1
+    panels = panels_per_row ## math.ceil(len(genes)/nrow)
+    
+    calc_figsize = [panels*0.9 + 1, 0.9*nrow]
+    if not (title is None):
+        calc_figsize[1] += 0.5
+    f, axs  = plt.subplots(nrow, panels, figsize = calc_figsize)
+    for i, (g, ax) in enumerate(zip(genes, axs.flat)):
+        print(g)
+        plot_violin(ann_model, g, hue, ax, **violin_args)
+        
+        if sharey and not (i % panels == 0):
+            ax.axes.yaxis.set_visible(False)
+            
+        ## This may not work axs.flat iterates by rows or columns
+        # if sharex and not (i % panels == 0):
+            # ax.axes.xaxis.set_visible(False)
+    for i, ax in enumerate(axs.flat):
+        if i+1 >len(genes):
+            ax.axis('off')
+    if not title is None:
+        f.suptitle(title)
+    f.tight_layout()
+    
+    return f
+
+param_dict = dict(sharey = True, orient = 'h')
+ann = sc.read('curated-objects/mono-unt-celltypes.h5ad')
+ann = ann[ann.obs["Cell Type"] == "oDAn1"].copy()
+norm(ann)
+
+f = print_grid(ann, ["TH", "NR4A2", "FOXA2", "LMX1A", "SYT1"], "celltype", title = 'Dopamine Neuron', **param_dict)
+f.savefig("troubleshooting-oDAn1-DA.png")
+f = print_grid(ann, ["HSPA5", "CANX", "HSP90B1"], "celltype" , title = "ER signature", **param_dict)
+f.savefig("troubleshooting-oDAn1-ER.png")
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+#+begin_src python
+ann.obs.groupby(["celltype", "genotype"]).size()
+#+end_src
+#+begin_example
+/usr/share/fonts/TTF/Consolas-Bold-Italic.ttf not added
+/home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1094: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+  if not is_categorical(df_full[k]):
+/home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1097: FutureWarning: The `inplace` parameter in pandas.Categorical.remove_unused_categories is deprecated and will be removed in a future version.
+  df_sub[k].cat.remove_unused_categories(inplace=True)
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+TH
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+2 vs. 10: 0.54
+NR4A2
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       ,*: 1.00e-02 < p <= 5.00e-02
+      ,**: 1.00e-03 < p <= 1.00e-02
+     ,***: 1.00e-04 < p <= 1.00e-03
+    ,****: p <= 1.00e-04
+
+2 vs. 10: 0.70
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+FOXA2
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       *: 1.00e-02 < p <= 5.00e-02
+      **: 1.00e-03 < p <= 1.00e-02
+     ***: 1.00e-04 < p <= 1.00e-03
+    ****: p <= 1.00e-04
+
+2 vs. 10: 1.07
+LMX1A
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       *: 1.00e-02 < p <= 5.00e-02
+      **: 1.00e-03 < p <= 1.00e-02
+     ***: 1.00e-04 < p <= 1.00e-03
+    ****: p <= 1.00e-04
+
+2 vs. 10: 0.68
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+SYT1
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       *: 1.00e-02 < p <= 5.00e-02
+      **: 1.00e-03 < p <= 1.00e-02
+     ***: 1.00e-04 < p <= 1.00e-03
+    ****: p <= 1.00e-04
+
+2 vs. 10: -0.73
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+HSPA5
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       *: 1.00e-02 < p <= 5.00e-02
+      **: 1.00e-03 < p <= 1.00e-02
+     ***: 1.00e-04 < p <= 1.00e-03
+    ****: p <= 1.00e-04
+
+2 vs. 10: -1.08
+CANX
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       *: 1.00e-02 < p <= 5.00e-02
+      **: 1.00e-03 < p <= 1.00e-02
+     ***: 1.00e-04 < p <= 1.00e-03
+    ****: p <= 1.00e-04
+
+2 vs. 10: -0.55
+HSP90B1
+No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+p-value annotation legend:
+      ns: p <= 1.00e+00
+       *: 1.00e-02 < p <= 5.00e-02
+      **: 1.00e-03 < p <= 1.00e-02
+     ***: 1.00e-04 < p <= 1.00e-03
+    ****: p <= 1.00e-04
+
+2 vs. 10: -0.74
+#+end_example
+#+attr_org: :width 439 :height 117
+[[file:./.ob-jupyter/a39663fffacde8579e0bd8bce33699b8e775e7e9.png]]
+#+attr_org: :width 295 :height 117
+[[file:./.ob-jupyter/4503efe26a6bd7f4c25ad3d04bbd58ae56bf4d56.png]]
+:END:
+#+RESULTS:
+: celltype  genotype 
+: 2         KOLF2         907
+:           SNCA-3x       987
+:           SNCA-corr    1148
+: 10        KOLF2         125
+:           SNCA-3x       239
+:           SNCA-corr     164
+: dtype: int64

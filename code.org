@@ -1,0 +1,2334 @@
+#+AUTHOR: Nikolaos Patikas
+#+Title: PD Models using human midbrain organoids
+
+#+PROPERTY: header-args:R :async :session organoids-pd*R* :rownames yes :colnames yes :noweb yes
+#+PROPERTY: header-args:python :async yes :session code*python* :noweb yes
+#+PROPERTY: header-args:shell :session metascape*shell* :tangle metascape.sh
+
+* Boilerplate
+** Local
+#+name: imports_local
+#+begin_src python
+
+import gc
+import itertools
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import pandas as pd
+import scanpy as sc
+import scipy.io
+import scipy.stats
+import scrublet as scr
+import seaborn as sns
+
+from scipy.io import mmwrite
+from sklearn.neighbors import NearestNeighbors
+from statannotations.Annotator import Annotator
+
+#+end_src
+
+#+RESULTS: imports_local
+
+#+name: functions_local
+#+begin_src python
+
+## Return ann objects which has the outer join
+def datasets_outer_join(objects_to_merge):
+    ## This function involves merging of sparse matrices which keeping track of all the metadata
+
+    import scipy.sparse
+    import functools
+    import pandas as pd
+    
+    ## Filter out columns for the outer join to work
+    ## Columns that exist across datasets
+    cols = functools.reduce(set.intersection,map(lambda x : set(x.obs.columns), objects_to_merge))
+    for ann in objects_to_merge:
+        ann.obs = ann.obs[list(cols)]
+
+    ## Generate global gene reference
+    
+    genes_unique = set.union(*map(lambda x : set(x.var_names), objects_to_merge))
+    gene_reference = list(genes_unique)
+    print('Total Genes', len(gene_reference))
+
+    offset_counter = 0
+    ## This is the coo sparse matrix data structure
+    gene_index = []
+    cell_index = []
+    vals = []
+
+    ## Start parsing objects
+    for ann in objects_to_merge:
+        ## Print batch dataset name, should be unique
+        print(ann.obs['batch'].unique()[0], ann.X.shape[0], 'cells', ann.X.shape[1], 'genes')
+        
+        ## Convert to sparse if not already
+        mat = scipy.sparse.coo_matrix(ann.X)
+
+        ## Get non zero elements, 
+        cells, genes = mat.nonzero()
+        expression_data = mat.data
+
+        ## Genes indices
+        gene_names = ann.var_names
+        ## Identify which index matches the gene name, this is the global reference now
+        genes_index = list(map(lambda x : gene_reference.index(x), gene_names))
+        ## Append the mapped genes in the new index for each non-zero value
+        gene_index.append(np.array(list(map(lambda x : genes_index[x], genes))))
+
+
+        ## Cells index
+        ## Add cell ids (columns) shifted by an offset in the new matrix
+        cell_index.append(cells + offset_counter)
+
+        ## Append also the values, ordering did NOT change
+        vals.append(mat.data)
+
+        offset_counter += mat.shape[0]
+    ## Sparse matrix
+    all_cells = np.concatenate(cell_index)
+    all_genes = np.concatenate(gene_index)
+    all_vals = np.concatenate(vals)
+    all_data = scipy.sparse.coo_matrix((all_vals, (all_cells,all_genes)))
+
+    ## Convert between types
+    ann = sc.AnnData(scipy.sparse.csr_matrix(all_data))
+    ann.obs = pd.concat(list(map(lambda x : x.obs, objects_to_merge)))
+    ann.var_names = gene_reference
+    print('New dataset', ann.shape[0], 'cells', ann.shape[1], 'genes')
+    return ann
+def norm(_ann):
+    from scipy.sparse import issparse
+    _ann.layers['norm_counts'] = sc.pp.normalize_total(_ann, target_sum = 10000, inplace = False)['X']
+    if issparse(_ann.layers['norm_counts']):
+        _ann.layers['lognorm_counts'] = sc.pp.log1p(_ann.layers['norm_counts'].A)
+    else:
+        _ann.layers['lognorm_counts'] = sc.pp.log1p(_ann.layers['norm_counts'])
+
+
+    return _ann
+
+## Dump ann object to destination directory
+def write_loom(ann, destination):
+    from scipy.io import mmwrite
+    import numpy as np
+    import os
+    if destination[-1] != '/':
+        destination += '/'
+    if not os.path.isdir(destination):
+        if os.path.isfile(destination):
+            raise FileExistsError(destination)
+        os.makedirs(destination, exist_ok=True)
+        
+    # ann.obs.to_csv(prefix+ 'obs.csv')
+    # ann.var.to_csv(prefix+ 'var.csv')
+    ann.var['Gene'] = ann.var_names
+    ann.obs['CellID'] = ann.obs_names
+    ann.write_loom(destination+'loom.loom')
+    for k in ['scVI', 'umap']:
+        obsm_name = 'X_'+k
+        if obsm_name in ann.obsm.keys():
+            print('Writing obsm', k)
+            np.savetxt(destination+k.upper(),ann.obsm[obsm_name])
+    print("Saved in", destination, "directory")
+
+
+
+def assign_clusternames(_ann, predicate = 'X_scVI-louvain-0.5'):
+    celltypes = ["oDAn1", "oDAn3", "oDAn2", "oDAn3", "FPP",
+                 "NS1", "NS2", "NEU1", "NEU2", "oDAn3", "oDAn3", "EPI"]
+
+    clusters = ["2", "10", "5", "0", "3","6","11","9","7","4", "1", "8"]
+
+
+    _ann.obs['celltype'] = _ann.obs[predicate]
+
+    _ann.obs['Cell Type'] = 'Unknown'
+    for c, name in list(zip(clusters, celltypes)):
+        print(c, name)
+        _ann.obs.loc[_ann.obs['celltype'] == c, 'Cell Type'] = name
+
+    _ann = _ann[_ann.obs['Cell Type'] != 'Unknown']
+    return _ann
+
+def fix_metadata(_ann):
+    _ann.obs["genotype"] = _ann.obs['genotype'].cat.reorder_categories(['KOLF2', 'SNCA-corr', 'SNCA-3x'])
+
+def curate_file(_ann):
+    _ann = fix_metadata(_ann)
+    _ann = assign_clusternames(_ann)
+    _ann = norm(_ann)
+
+
+def getlfc(pred, factor):
+    def lfc(gb):
+        return gb.apply(
+            lambda x : "{:.2f}".format(np.log2(x[x[pred] != factor].lfc.mean()) -
+                                       np.log2(x[x[pred] == factor].lfc.mean())))        
+    return lfc
+
+
+    
+def violin_plot_hue(ann, genes, x, hue, base_factor, rows = 2):
+    import math
+    panels = math.ceil(len(genes)/rows)
+    f, axs  = plt.subplots(rows, panels, figsize= (panels*2 + 2, 2.5*rows))
+
+    base_factor = list(ann.obs[hue].cat.categories)[0]
+    lfc_comparison = getlfc(hue, base_factor)
+    
+    for g, ax in zip(genes, axs.flat):
+        print(g)
+        _df = ann.obs[[hue,x]].copy()
+        _df[g] = ann.layers['lognorm_counts'][:, ann.var_names == g].flatten()
+        _df[g + 'unlog'] = ann.layers['lognorm_counts'][:, ann.var_names == g].flatten()
+        _df['lfc'] = ann.layers['norm_counts'][:, ann.var_names == g].A.flatten()
+    
+        v = sns.violinplot(data = _df, y = g, x = x, hue=hue, ax = ax)
+        hue_labels = v.get_legend_handles_labels()[1]
+        vals = lfc_comparison(_df.groupby(x))
+        
+        
+        x_labels = list(map(lambda x : x.get_text(), v.get_xticklabels()))
+        
+        pairs = list(map(lambda x : tuple(itertools.product([x], hue_labels)), x_labels))
+        v.set(ylabel=None, xlabel = None)
+    
+        ax.legend().remove()
+        ax.set_title(g,pad = 25)
+        
+        # v.set_xticklabels(v.get_xticklabels(), rotation=0)
+    
+        annot = Annotator(v, pairs, data = _df, x = x , y = g, hue = hue)
+        # annot.configure(test='Mann-Whitney', text_format='star', loc='outside')
+
+        annot.configure(loc='outside')
+        annot.set_custom_annotations(vals)
+        annot.annotate()
+        
+    if len(f.axes) > len(genes):
+        f.axes[-1].axis('off')
+        
+    labels, lines = f.axes[0].get_legend_handles_labels()
+    f.legend(labels, lines, loc = 'lower right', bbox_to_anchor = (0.9, 0.2))
+    return f
+#+end_src
+
+** HPC
+
+#+name: init_hpc_env
+#+begin_src python
+%cd /home/np504/rds/rds-organoids/scvi
+import scanpy as sc
+from collections.abc import Iterable
+import itertools
+import scvi
+import numpy as np
+scvi.settings.seed = 69
+#+end_src
+
+#+name: integration_functions
+#+begin_src python
+
+def isiter(v):
+    return isinstance(v, Iterable) and not isinstance(v, str)
+
+def param_scan(**param_dict):
+    ps = dict(param_dict)
+    ## Split to iterables and non-iterables
+    iterables = {k:ps.pop(k) for k in param_dict.keys() if isiter(ps[k])}
+    non_iterables = ps
+    keys, values = list(zip(*iterables.items()))
+    for value_set in itertools.product(*values):
+        yield {**dict(zip(keys, value_set)), **non_iterables}
+
+        
+def postfun(ann, vae, prefix, params):
+    new_params = 'X_scVI' + params
+    ann.obsm[new_params] = vae.get_latent_representation()
+    print('Calculating Neighbors')
+    sc.pp.neighbors(ann, use_rep = new_params, key_added = params)
+    print('Calculating Umap')
+    sc.tl.umap(ann, min_dist=0.3, neighbors_key = params)
+    
+def norm(_ann):
+    from scipy.sparse import issparse
+
+    _ann.layers['norm_counts'] = sc.pp.normalize_total(_ann, target_sum = 10000, inplace = False)['X']
+    if issparse(_ann.layers['norm_counts']):
+        _ann.layers['lognorm_counts'] = sc.pp.log1p(_ann.layers['norm_counts'].A)
+    else:
+        _ann.layers['lognorm_counts'] = sc.pp.log1p(_ann.layers['norm_counts'])
+    # sc.pp.neighbors(_ann, use_rep="X_scVI")
+    # sc.tl.umap(_ann, min_dist = 0.3)
+    return _ann
+
+    
+def gridscan(ann1, ann2,
+             prefix,
+             global_prefix = './',
+             batch_key = 'batch',
+             categorical_variables = [],
+             continuous_variables = None,
+             colors = [], **model_args_grid):
+
+    sc.pp.calculate_qc_metrics(ann1, inplace = True)
+    ## Filter lowly expressed genes
+    ann1 = ann1[:,ann1.var['n_cells_by_counts'] > ann1.n_obs/1000]
+    
+    sc.pp.calculate_qc_metrics(ann2, inplace = True)
+    ann2 = ann2[:,ann2.var['n_cells_by_counts'] > ann2.n_obs/1000]
+    ann = sc.AnnData.concatenate(ann1, ann2)
+    for c in categorical_variables:
+        ann.obs[c] = ann.obs[c].astype(str).astype('category')
+
+    scvi.model.SCVI.setup_anndata(ann,
+                                  batch_key = batch_key,
+                                  categorical_covariate_keys = categorical_variables,
+                                  continuous_covariate_keys = continuous_variables)
+    
+    for dict_params in param_scan(**model_args_grid):
+        dict_params_name = '-'.join([str(k)+'.'+str(v) for k,v in dict_params.items()])
+        print(dict_params_name)
+        vae = scvi.model.SCVI(ann, **dict_params)
+        vae.train(early_stopping = False)
+        vae.save(global_prefix + '/gridscan-models/' + prefix + '__' + dict_params_name, overwrite = True)
+        postfun(ann, vae, prefix, dict_params_name)
+        sc.pl.umap(ann,
+                   color = colors,
+                   save = 'gridscan-' + prefix +'__'+ dict_params_name + '.png')
+
+    object_path = global_prefix + prefix + '.h5ad'
+    print('Writing to', object_path)
+    ann.write_h5ad(object_path)
+
+
+
+    
+#+end_src
+
+
+
+
+* Functions
+#+name: functionsR
+#+begin_src R
+
+## Conventions
+## 1) dir is a directory, base directory is the name of the datasets
+## 2) File is saved one at the same level with directory
+## 3) Meant to be used with the partner function method
+loom.to.Seurat <- function(dir, import.obsm = NULL, idents = 'Cell.Type') {
+  library(SeuratDisk)
+  library(SeuratObject)
+  library(Seurat)
+  
+  ## Sanitize trailing / from the end of the string to prevent writing in the directory
+  while(substr(dir,nchar(dir), nchar(dir)) == '/'){
+    dir <- substr(dir, 1, nchar(dir) - 1)
+  }
+  
+  if(!dir.exists(dir))
+  {
+    stop(paste(dir, "does not exist"))
+  }
+  
+  message(paste("Loading loom.loom from", dir, "directory"))
+  mono.unt <- Connect(filename =paste0(dir,'/loom.loom'), mode = "r")
+  seu <- as.Seurat(mono.unt)
+  Idents(seu) <- seu[[idents]]
+  
+  if(!is.null(import.obsm)){
+    for(obsm in import.obsm){
+      file.obsm <- paste0(dir, '/',obsm)
+      message(paste("Loading ",obsm, " from", file.obsm, "file"))
+      dim.red <- as.matrix(read.table(file.obsm))
+      cols <- paste0(obsm, "_", 1:ncol(dim.red))
+      print(cols)
+      colnames(dim.red) <- cols
+      rownames(dim.red) <- colnames(seu)
+      seu[[obsm]] <- CreateDimReducObject(embeddings = dim.red, key = paste0(obsm,"_"), assay = DefaultAssay(seu))
+    }
+  }
+  
+  ## Save it one level up from the folder by the same name
+  save.path <- paste0(dir,'.rds')
+  
+  message(paste("Saving to Seurat object:", save.path))
+  saveRDS(seu, save.path)
+  seu
+}
+
+
+
+
+
+#+end_src
+#+name: mascR
+#+begin_src R
+## https://raw.githubusercontent.com/immunogenomics/masc/master/R/masc.R
+#' MASC - Mixed effect modeling of Associations of Single Cells
+#'
+#' @param dataset A data frame containing the contrast factor, random, and fixed effects for the model
+#' @param cluster A factor indicating cluster assignments for each cell
+#' @param contrast A vector indicating the variable to be tested for association with cluster abundance. Must match a column in dataset.
+#' @param random_effects A vector indicating which terms should be modeled as random effects covariates. Terms listed must match columns in dataset.
+#' @param fixed_effects A vector indicating which terms should be modeled as fixed effects covariates. Terms listed must match columns in dataset.
+#' @param save_models Should MASC save the mixed-effects model objects generated for each cluster?
+#' @param save_model_dir Location to save mixed-effect model objects. Defaults to current working directory.
+#' @param verbose TRUE/FALSE
+#'
+#' @return data frame containing calculated association p-values and odds ratios for each cluster tested
+#'
+#' @examples
+#' # Create test dataset with three clusters of 100 cells each
+#' test.df <- data.frame(cluster = factor(rep(c(1, 2, 3), each = 100)))
+#' # Create 6 donors that are cases or controls and include covariates
+#' donors.df <- data.frame(donor = rep(paste("Donor", LETTERS[1:6], sep = "_"), each = 50),
+#' sex = rep(c("M", "F", "M", "F", "F", "M"), each = 50),
+#' status = rep(c("Case", "Case", "Control", "Control", "Case", "Control"), each = 50))
+#' # Now make cluster 1 mostly case, cluster 2 mostly controls, etc
+#' cases <- donors.df[donors.df$status == "Case",]
+#' cases <- cases[sample(nrow(cases)),]
+#' controls <- donors.df[donors.df$status == "Control",]
+#' controls <- controls[sample(nrow(controls)),]
+#' test.df <- cbind(rbind(cases[1:75,], controls[1:25,], cases[76:115,], controls[26:85,], cases[116:150,], controls[86:150,]), test.df)
+#' # Test set call
+#' library(lme4)
+#' MASC(data = test.df, cluster = test.df$cluster, contrast = "status", random_effects = "donor", fixed_effects = "sex")
+#'
+
+MASC <- function(dataset, cluster, contrast, random_effects = NULL, fixed_effects = NULL,
+                 verbose = FALSE, save_models = FALSE, save_model_dir = NULL) {
+  # Check inputs
+  if (is.factor(dataset[[contrast]]) == FALSE) {
+    stop("Specified contrast term is not coded as a factor in dataset")
+  }
+
+  # Generate design matrix from cluster assignments
+  cluster <- as.character(cluster)
+  designmat <- model.matrix(~ cluster + 0, data.frame(cluster = cluster))
+  dataset <- cbind(designmat, dataset)
+
+  # Convert cluster assignments to string
+##  cluster <- as.character(cluster)
+  # Prepend design matrix generated from cluster assignments
+  designmat <- model.matrix(~ cluster + 0, data.frame(cluster = cluster))
+  dataset <- cbind(designmat, dataset)
+  # Create output list to hold results
+  res <- vector(mode = "list", length = length(unique(cluster)))
+  names(res) <- attributes(designmat)$dimnames[[2]]
+
+  # Create model formulas
+  if (!is.null(fixed_effects) && !is.null(random_effects)) {
+    model_rhs <- paste0(c(paste0(fixed_effects, collapse = " + "),
+                          paste0("(1|", random_effects, ")", collapse = " + ")),
+                        collapse = " + ")
+    if (verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+    }
+  } else if (!is.null(fixed_effects) && is.null(random_effects)) {
+    model_rhs <- paste0(fixed_effects, collapse = " + ")
+    if (verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+      # For now, do not allow models without mixed effects terms
+      stop("No random effects specified")
+    }
+  } else if (is.null(fixed_effects) && !is.null(random_effects)) {
+    model_rhs <- paste0("(1|", random_effects, ")", collapse = " + ")
+    if (verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+    }
+  } else {
+    model_rhs <- "1" # only includes intercept
+    if (verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+      stop("No random or fixed effects specified")
+    }
+  }
+
+  # Initialize list to store model objects for each cluster
+  cluster_models <- vector(mode = "list",
+                           length = length(attributes(designmat)$dimnames[[2]]))
+  names(cluster_models) <- attributes(designmat)$dimnames[[2]]
+
+  # Run nested mixed-effects models for each cluster
+  for (i in seq_along(attributes(designmat)$dimnames[[2]])) {
+    test_cluster <- attributes(designmat)$dimnames[[2]][i]
+    if (verbose == TRUE) {
+      message(paste("Creating logistic mixed models for", test_cluster))
+    }
+    null_fm <- as.formula(paste0(c(paste0(test_cluster, " ~ 1 + "),
+                                   model_rhs), collapse = ""))
+    full_fm <- as.formula(paste0(c(paste0(test_cluster, " ~ ", contrast, " + "),
+                                   model_rhs), collapse = ""))
+    # Run null and full mixed-effects models
+    null_model <- lme4::glmer(formula = null_fm, data = dataset,
+                              family = binomial, nAGQ = 1, verbose = 0,
+                              control = glmerControl(optimizer = "bobyqa"))
+    full_model <- lme4::glmer(formula = full_fm, data = dataset,
+                              family = binomial, nAGQ = 1, verbose = 0,
+                              control = glmerControl(optimizer = "bobyqa"))
+    model_lrt <- anova(null_model, full_model)
+    # calculate confidence intervals for contrast term beta
+    contrast_lvl2 <- paste0(contrast, levels(dataset[[contrast]])[2])
+    contrast_ci <- confint.merMod(full_model, method = "Wald",
+                                  parm = contrast_lvl2)
+    # Save model objects to list
+    cluster_models[[i]]$null_model <- null_model
+    cluster_models[[i]]$full_model <- full_model
+    cluster_models[[i]]$model_lrt <- model_lrt
+    cluster_models[[i]]$confint <- contrast_ci
+  }
+
+  # Organize results into output dataframe
+  output <- data.frame(cluster = attributes(designmat)$dimnames[[2]],
+                       size = colSums(designmat))
+  output$model.pvalue <- sapply(cluster_models, function(x) x$model_lrt[["Pr(>Chisq)"]][2])
+  output[[paste(contrast_lvl2, "OR", sep = ".")]] <- sapply(cluster_models, function(x) exp(fixef(x$full)[[contrast_lvl2]]))
+  output[[paste(contrast_lvl2, "OR", "95pct.ci.lower", sep = ".")]] <- sapply(cluster_models, function(x) exp(x$confint[contrast_lvl2, "2.5 %"]))
+  output[[paste(contrast_lvl2, "OR", "95pct.ci.upper", sep = ".")]] <- sapply(cluster_models, function(x) exp(x$confint[contrast_lvl2, "97.5 %"]))
+
+  # Return MASC results and save models if specified
+  if (save_models == TRUE) {
+    saveModelObj(cluster_models, save_dir = save_model_dir)
+    return(output)
+  } else {
+    return(output)
+  }
+}
+
+
+
+
+#+end_src
+
+
+#+name: metascape
+#+begin_src shell
+
+function metascape_unique {
+    metascape_root="/home/main/git/msbio_v3.5.20220101/"
+    ms_instance="$2"
+    CSV="$1"
+    filename=$(basename "$CSV")
+    name="${filename%.*}"
+    extension="${filename##*.}"
+    gene_list="${metascape_root}/data/${name}.txt"
+    cut -f 1 -d "," "$CSV" | tail -n +2 > "${gene_list}"
+    pushd .
+
+    cd $metascape_root
+    echo Working Directory $PWD
+    bin/ms.sh -u -o "/data/${name}" "/data/${name}.txt" --option /data/custom.json
+    popd
+}
+
+
+function metascape {
+    metascape_root="/home/main/git/msbio_v3.5.20220101/"
+    ms_instance="$2"
+    CSV="$1"
+    filename=$(basename "$CSV")
+    name="${filename%.*}"
+    cp $CSV "${metascape_root}/data/"
+    pushd .
+    cd $metascape_root
+    echo Working Directory $PWD
+    chmod 777 "${metascape_root}/data/${filename}"
+    bin/ms.sh -o "/data/${name}" "/data/${filename}" --option /data/custom.json
+    popd
+}
+
+#+end_src
+
+#+RESULTS: metascape
+
+#+RESULTS:
+: txt
+
+
+* Preprocessing Datasets
+** OhMOs Day 49 organoids
+:PROPERTIES:
+:header-args:python: :session code-OhMOs-preprocessing*python* :async yes :noweb yes 
+:ORDERED:  t
+:END:
+*** Doublet Detection
+#+name: load_individual_samples
+#+begin_src python
+<<imports_local>>
+samples = [
+    "./all-data/SNCA3x_MOSAIC_UNT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/KOLF2_MONO_ROT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/KOLF2_MONO_UNT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/SNCA3x_MONO_ROT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/SNCA3x_MONO_UNT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/SNCA3x_MOSAIC_ROT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/SNCAWT_MONO_ROT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/SNCAWT_MONO_UNT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/SNCAWT_MOSAIC_ROT_D49/outs/filtered_feature_bc_matrix/",
+    "./all-data/SNCAWT_MOSAIC_UNT_D49/outs/filtered_feature_bc_matrix/"
+]
+
+scrublet_data = {}
+
+for input_dir in samples:
+    sample_name = input_dir.replace('./all-data/', '').replace('/outs/filtered_feature_bc_matrix/','')
+    print(sample_name)
+    counts_matrix = scipy.io.mmread(input_dir + '/matrix.mtx.gz').T.tocsc()
+    genes = pd.read_csv(input_dir + 'features.tsv.gz', sep = '\t', header = None)[0]
+    scrublet_data[sample_name] = {'counts':counts_matrix, 'genes': genes}
+    print('Counts matrix shape: {} rows, {} columns'.format(counts_matrix.shape[0], counts_matrix.shape[1]))
+    print('Number of genes in gene list: {}'.format(len(genes)))
+#+end_src
+#+name: run_scrublet
+#+begin_src python
+
+scrubs = {}
+scrubs_res = {}
+sample_masks = {}
+
+seed = 69
+import scanpy as sc
+for input_dir in samples:
+    sample_name = input_dir.replace('./all-data/', '').replace('/outs/filtered_feature_bc_matrix/','')
+    print(sample_name)
+    counts_matrix = scrublet_data[sample_name]['counts']
+    #mask = [pd.Series(np.ones(counts_matrix.shape[0]).astype(np.bool))]
+    mask = []
+    counts = counts_matrix
+    
+    for i in range(3):
+        print('Iteration', i)
+        scrub = scr.Scrublet(counts, expected_doublet_rate = 0.2, random_state = seed)
+        doublet_scores, predicted_doublets = scrub.scrub_doublets(n_prin_comps=30,
+                                                                  mean_center=True, 
+                                                                  normalize_variance=True)
+        if i == 0:
+            scrub.call_doublets(threshold=0.33)
+        else:
+            scrub.call_doublets(threshold=0.30)
+        
+        scrub.set_embedding('UMAP', scr.get_umap(scrub.manifold_obs_, 10, min_dist=0.3))
+        scrub.plot_histogram()
+        plt.savefig('scrublet-images/hist-' + sample_name + '-'+ str(i) + '.png')
+        scrub.plot_embedding('UMAP', order_points=True)
+        plt.savefig('scrublet-images/UMAP-'+ sample_name + '-'+ str(i) + '.png')
+        
+        mask.append(~scrub.predicted_doublets_)
+        counts = counts[mask[i]]
+        
+        
+    
+    scrubs[sample_name] = scrub
+    scrubs_res[sample_name] = (doublet_scores, predicted_doublets)
+    sample_masks[sample_name] = mask
+    
+    
+print('Done')
+
+#+end_src
+#+name: merge_samples_with_doublet_info
+#+begin_src python
+samples_doublets = [
+    "./doublets/SNCA3x_MOSAIC_UNT_D49.h5ad",
+    "./doublets/KOLF2_MONO_ROT_D49.h5ad",
+    "./doublets/KOLF2_MONO_UNT_D49.h5ad",
+    "./doublets/SNCA3x_MONO_ROT_D49.h5ad",
+    "./doublets/SNCA3x_MONO_UNT_D49.h5ad",
+    "./doublets/SNCA3x_MOSAIC_ROT_D49.h5ad",
+    "./doublets/SNCAWT_MONO_ROT_D49.h5ad",
+    "./doublets/SNCAWT_MONO_UNT_D49.h5ad",
+    "./doublets/SNCAWT_MOSAIC_ROT_D49.h5ad",
+    "./doublets/SNCAWT_MOSAIC_UNT_D49.h5ad"
+]
+
+import scanpy as sc
+adatas = {}
+for input_dir in samples_doublets:
+    sample_name = input_dir.replace('./doublets/', '').replace('.h5ad','')
+    adata = sc.read(input_dir)
+    index = adata.obs_names 
+    for mask in sample_masks[sample_name]:        
+        index  = index[mask].copy()
+    adata.obs['scrublet_singlet'] = False
+    adata.obs.loc[adata.obs_names.isin(index) ,'scrublet_singlet'] = True
+    adatas[sample_name] = adata
+
+ann_all = sc.AnnData.concatenate(*adatas.values())
+ann_all.write_h5ad('curated-objects/all-samples-culture-raw.h5ad')
+#+end_src
+
+*** Fix metadata
+
+
+** Merge neuronal datasets
+:PROPERTIES:
+:header-args:python: :session DA-neurons-preprocessing*python* :async yes :noweb yes 
+:ORDERED:  t
+:END:
+#+begin_src python
+
+<<imports_local>>
+<<functions_local>>
+
+wang_neurons = sc.read("curated-objects/neuron_objects_integrations/wang_annotated.h5ad")
+ansari_neurons = sc.read("curated-objects/neuron_objects_integrations/ansari_annotated.h5ad")
+fernandes_neurons = sc.read("curated-objects/neuron_objects_integrations/fernandes_annotated.h5ad")
+fiorenzano_neurons = sc.read("curated-objects/neuron_objects_integrations/fiorenzano_annotated.h5ad")
+#+end_src
+
+#+RESULTS:
+
+
+#+begin_src python
+
+objects_to_merge = [ansari_neurons.copy(), fiorenzano_neurons.copy(), fernandes_neurons.copy(), wang_neurons.copy()]
+
+
+# n = list(map(print, map(lambda x : str(x.obs.batch.unique()+ ' ' + str(x.n_obs) + ' cells, ' + str(x.n_vars)+ ' genes') ,objects_to_merge)))
+
+for ann in objects_to_merge:
+    if ann.obs['batch'].unique() == 'fernandes-2d':
+        ann.obs['batch'] = 'fernandes'
+    dataset_name = ann.obs['batch'].astype(str).unique()
+    if len(dataset_name) != 1:
+        raise ValueError("Dataset does not have unique batch")
+    ann.obs['celltype'] = ann.obs[dataset_name[0] + '-celltype'].astype(str)
+
+
+
+ann_everything = datasets_outer_join(objects_to_merge)
+ann = norm(ann_everything)
+
+
+#+end_src
+
+#+RESULTS:
+: Total Genes 26526
+: ansari 14586 cells 16450 genes
+: fiorenzano 5928 cells 18681 genes
+: fernandes 1874 cells 16149 genes
+: wang 13024 cells 22053 genes
+: New dataset 35412 cells 26526 genes
+
+
+#+name: convention_matrix
+#+begin_src python
+
+ohmo = 'OhmO'
+# ann.obs['celltype'] = ann.obs['ansari-celltype'].astype(str)
+
+
+ann.obs['id'] = ann.obs[['batch', 'celltype']].apply(lambda x : "_". join(x), axis = 1)
+ann.obs['id'] = ann.obs['id'].apply(lambda x : x.replace('ansari', ohmo))
+ann.obs['id'] = ann.obs['id'].apply(lambda x : x.replace('fernandes', "2D"))
+ann.obs['id'] = ann.obs['id'].apply(lambda x : x.replace('fiorenzano', '3D'))
+ann.obs['id'] = ann.obs['id'].apply(lambda x : x.replace('wang', 'hSNpc').replace('Dopamine neurons', 'SNpc'))
+
+
+ann.write_h5ad('curated-objects/neurons_all-datasets.h5ad')
+write_loom(ann, "seurat-conversion/neuron_all-datasets")
+#+end_src
+
+#+RESULTS: convention_matrix
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1192: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if is_string_dtype(df[key]) and not is_categorical(df[key])
+: ... storing 'louvain' as categorical
+: ... storing 'batch' as categorical
+: ... storing 'celltype' as categorical
+: ... storing 'id' as categorical
+: Saved in seurat-conversion/neuron_all-datasets/ directory
+
+
+#+name: export_R_object
+#+begin_src R
+<<functionsR>>
+loom.to.Seurat("seurat-conversion/neuron_all-datasets/", idents = 'id')
+#+end_src
+
+#+RESULTS: export_R_object
+|---|
+
+
+#+begin_src python :noweb yes
+<<imports_local>>
+filenames = ["ansari_annotated.h5ad", "fernandes_annotated.h5ad", "fiorenzano_annotated.h5ad", "wang_annotated.h5ad"]
+anns = {}
+
+for f in filenames:
+    dn, _ = f.split("_")
+    print("Reading:", f)
+    anns[dn] = sc.read_h5ad("curated-objects/neuron_objects_integrations/" + f)
+    
+
+
+
+#+end_src
+
+#+RESULTS:
+: Reading: ansari_annotated.h5ad
+: Reading: fernandes_annotated.h5ad
+: Reading: fiorenzano_annotated.h5ad
+: Reading: wang_annotated.h5ad
+
+#+begin_src python
+
+for f, ann in anns.items():
+    ann = anns[f]
+    ann.obs["UMAP_1"] = ann.obsm["X_umap"][:, 0]
+    ann.obs["UMAP_2"] = ann.obsm["X_umap"][:, 1]
+    ann.obs.to_csv("aux-files/label_transfer-"+ f + ".csv")
+
+#+end_src
+
+#+RESULTS:
+
+
+
+
+
+
+
+* Dimensionality Reduction
+:PROPERTIES:
+:header-args:python: :async yes :session ./kernels/gpu-ssh.json :noweb yes
+:END:
+** OhMOs untreated single culture
+*** Export to Seurat
+:PROPERTIES:
+:header-args:python: :async yes :session seurat-conversion*python* :noweb yes
+:header-args:R: :async :session seurat-conversion*R* :noweb yes
+:END:
+#+begin_src python
+<<imports_local>>
+<<functions_local>>
+ann = sc.read('curated-objects/mono-unt-celltypes.h5ad')
+write_loom(ann, "seurat-conversion/mono-unt")
+#+end_src
+
+#+RESULTS:
+: The loom file will lack these fields:
+: {'_scvi_extra_categoricals', 'X_scVI', '_scvi_extra_continuous', 'X_umap'}
+: Use write_obsm_varm=True to export multi-dimensional annotations
+: Writing obsm scVI
+: Writing obsm umap
+: Saved in seurat-conversion/mono-unt/ directory
+
+#+begin_src R
+<<functionsR>>
+loom.to.Seurat("seurat-conversion/mono-unt", import.obsm = c("UMAP", "SCVI"), idents = 'Cell.Type')
+#+end_src
+
+#+RESULTS:
+*** scVI
+#+begin_src python
+%cd /home/np504/rds/rds-organoids/scvi
+!date
+import scanpy as sc
+import itertools
+import scanpy as sc
+import scvi
+import numpy as np
+
+
+filename = '../raw-filtered-objects/mono-unt.h5ad'
+ann = sc.read_h5ad(filename)
+
+train_params = dict(
+    n_hidden = 256,
+    n_layers = 1,
+    n_latent = 15,
+    dropout_rate = 0.1,
+    dispersion = 'gene'
+)
+
+scvi_model_params = dict(
+    labels_key = 'cellline',
+    categorical_covariate_keys = ['cellline'],
+    continuous_covariate_keys = ['pct_counts_mito', 'pct_counts_ribo']
+)
+
+scvi.model.SCVI.setup_anndata(ann, **scvi_model_params)
+
+#+end_src
+
+#+RESULTS:
+:results:
+: /rds/project/rds-rVgVnOsvADI/scvi
+: Tue 14 Dec 12:50:32 GMT 2021
+: INFO     No batch_key inputted, assuming all cells are same batch                            
+: INFO     Using labels from adata.obs["cellline"]                                             
+: INFO     Using data from adata.X                                                             
+: INFO     Successfully registered anndata object containing 19181 cells, 20584 vars, 1        
+:          batches, 3 labels, and 0 proteins. Also registered 1 extra categorical covariates   
+:          and 2 extra continuous covariates.                                                  
+: INFO     Please do not further modify adata until model is trained.                          
+:end:
+
+#+begin_src python
+
+vae = scvi.model.SCVI(ann, **train_params)
+vae.train()
+
+
+vae.save('models/mono-culture-unt/', overwrite = True)
+
+ann.uns['scVI_train_params'] = train_params
+
+ann.obsm['X_scVI'] = vae.get_latent_representation()
+
+ann.layers["scvi_normalized"] = vae.get_normalized_expression(
+    library_size=1e4
+)
+
+sc.pp.neighbors(ann, use_rep="X_scVI")
+sc.tl.umap(ann, min_dist = 0.3)
+
+## Perform clustering
+sc.tl.louvain(ann, resolution = 0.5, key_added = 'X_scVI-louvain-0.5')
+
+ann.write_h5ad('../curated-objects/mono-unt.h5ad')
+
+#+end_src
+
+
+
+#+begin_src python
+sc.pl.umap(ann, color = ['cellline', 'X_scVI-louvain-0.5'])
+#+end_src
+
+** OhMOs all
+
+** 2D-3D
+** in-vivo SNpc
+** Fiorenzano Data
+
+
+* Characterizations
+** Gene Markers for each cell type
+:PROPERTIES:
+:header-args:python: :async yes :session ./kernels/gpu-ssh.json :noweb yes
+:END:
+#+begin_src python
+<<init_hpc_env>>
+ann = sc.read_h5ad("../curated-objects/mono-unt-celltypes.h5ad")
+vae = scvi.model.SCVI.load('models/mono-culture-unt/', adata = ann)
+
+#+end_src
+
+#+RESULTS:
+#+begin_example
+/rds/project/rds-rVgVnOsvADI/scvi
+Global seed set to 0
+Global seed set to 69
+[34mINFO    [0m Using data from adata.X                                                             
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/sklearn/utils/deprecation.py:87: FutureWarning: Function transfer_anndata_setup is deprecated; This method will be removed in 0.15.0. Please avoid building any new dependencies on it.
+  warnings.warn(msg, category=FutureWarning)
+[34mINFO    [0m Registered keys:[1m[[0m[32m'X'[0m, [32m'batch_indices'[0m, [32m'labels'[0m, [32m'cat_covs'[0m, [32m'cont_covs'[0m[1m][0m           
+[34mINFO    [0m Successfully registered anndata object containing [1;36m19157[0m cells, [1;36m20584[0m vars, [1;36m1[0m        
+         batches, [1;36m3[0m labels, and [1;36m0[0m proteins. Also registered [1;36m1[0m extra categorical covariates   
+         and [1;36m1[0m extra continuous covariates.                                                  
+#+end_example
+
+#+begin_src python
+
+genes_clusters = vae.differential_expression(adata=ann,
+                                    groupby = 'celltype',
+                                    mode='vanilla',
+                                    fdr_target=0.05)
+
+#+end_src
+
+#+RESULTS:
+: DE...: 100%|█████████████████████████████████████████| 12/12 [02:02<00:00, 10.21s/it]
+
+
+#+begin_src python
+genes_celltypes = vae.differential_expression(adata = ann,
+                                    groupby = 'Cell Type',
+                                    mode = 'vanilla',
+                                    fdr_target = 0.05)
+
+#+end_src
+
+#+RESULTS:
+: DE...: 100%|███████████████████████████████████████████| 9/9 [01:31<00:00, 10.19s/it]
+
+#+begin_src python
+import pandas as pd
+path = 'diffexp/cluster-marker-genes/'
+df = pd.DataFrame(index = range(200))
+
+for grp, _df in genes_clusters[genes_clusters['non_zeros_proportion1'] > 0.05].groupby('group1'):
+    _df_up = _df.sort_values(by = 'bayes_factor', ascending = False).head(200)
+    df[grp+'_up'] = _df_up.index
+    _df_up.to_csv(path + 'marker_genes'+grp +'-up.csv')
+    _df_down = _df.sort_values(by = 'bayes_factor', ascending = True).head(200)
+    df[grp+'_down'] = _df_down.index
+    _df_down.to_csv(path + 'marker_genes'+grp +'-down.csv')
+    print("Min Bayes factors",grp, _df_down.tail(1).bayes_factor, _df_up.tail(1).bayes_factor)
+    
+df.to_csv(path + 'marker-genes-collated-mono-unt-clusters.csv', index = None)
+
+df = pd.DataFrame(index = range(200))
+path = 'diffexp/celltype-marker-genes/'
+for grp, _df in genes_celltypes[genes_celltypes['non_zeros_proportion1'] > 0.05].groupby('group1'):
+    _df_up = _df.sort_values(by = 'bayes_factor', ascending = False).head(200)
+    df[grp + '_up'] = _df_up.index
+    _df_up.to_csv(path + 'marker_genes'+grp +'-up.csv')
+    _df_down = _df.sort_values(by = 'bayes_factor', ascending = True).head(200)
+    df[grp + '_down'] = _df_down.index
+    _df_down.to_csv(path + 'marker_genes'+grp +'-down.csv')
+    print("Min Bayes factors", grp, _df_down.tail(1).bayes_factor, _df_up.tail(1).bayes_factor)
+    
+df.to_csv(path + 'marker-genes-collated-mono-unt-celltype.csv', index = None)
+
+#+end_src
+
+#+RESULTS:
+#+begin_example
+Min Bayes factors 0 RPN2   -1.52859
+Name: bayes_factor, dtype: float64 TDRP    1.624392
+Name: bayes_factor, dtype: float64
+Min Bayes factors 1 ANKRD13D   -2.240179
+Name: bayes_factor, dtype: float64 RALA    2.265744
+Name: bayes_factor, dtype: float64
+Min Bayes factors 10 SNX3   -2.338303
+Name: bayes_factor, dtype: float64 NAA25    2.240179
+Name: bayes_factor, dtype: float64
+Min Bayes factors 11 SHISA5   -1.82195
+Name: bayes_factor, dtype: float64 SAV1    1.761521
+Name: bayes_factor, dtype: float64
+Min Bayes factors 2 SPARC   -1.082676
+Name: bayes_factor, dtype: float64 CDK5R1    1.543686
+Name: bayes_factor, dtype: float64
+Min Bayes factors 3 RBM34   -2.092786
+Name: bayes_factor, dtype: float64 SELENBP1    2.737439
+Name: bayes_factor, dtype: float64
+Min Bayes factors 4 COX8A   -2.094833
+Name: bayes_factor, dtype: float64 GAK    2.456012
+Name: bayes_factor, dtype: float64
+Min Bayes factors 5 DMRTA2   -1.228752
+Name: bayes_factor, dtype: float64 MARCKS    1.81529
+Name: bayes_factor, dtype: float64
+Min Bayes factors 6 CDK20   -1.897427
+Name: bayes_factor, dtype: float64 SOX21    1.9045
+Name: bayes_factor, dtype: float64
+Min Bayes factors 7 EIF2B2   -1.494816
+Name: bayes_factor, dtype: float64 MGAT4C    1.800419
+Name: bayes_factor, dtype: float64
+Min Bayes factors 8 NAA30   -2.686076
+Name: bayes_factor, dtype: float64 ITM2B    2.706345
+Name: bayes_factor, dtype: float64
+Min Bayes factors 9 ACADVL   -1.546447
+Name: bayes_factor, dtype: float64 CTBP2    2.428837
+Name: bayes_factor, dtype: float64
+Min Bayes factors EPI NDFIP2   -2.624154
+Name: bayes_factor, dtype: float64 MYL12A    2.617825
+Name: bayes_factor, dtype: float64
+Min Bayes factors FPP AP3B2   -2.070473
+Name: bayes_factor, dtype: float64 GSTK1    2.75865
+Name: bayes_factor, dtype: float64
+Min Bayes factors NEU1 B2M   -1.551983
+Name: bayes_factor, dtype: float64 FAM204A    2.447794
+Name: bayes_factor, dtype: float64
+Min Bayes factors NEU2 SLC2A3   -1.506891
+Name: bayes_factor, dtype: float64 DPYSL4    1.823621
+Name: bayes_factor, dtype: float64
+Min Bayes factors NS1 RNF187   -1.892146
+Name: bayes_factor, dtype: float64 CDCA7    1.942258
+Name: bayes_factor, dtype: float64
+Min Bayes factors NS2 KLHDC3   -1.859168
+Name: bayes_factor, dtype: float64 NOP58    1.751961
+Name: bayes_factor, dtype: float64
+Min Bayes factors oDAn1 CANX   -1.078447
+Name: bayes_factor, dtype: float64 SET    1.53818
+Name: bayes_factor, dtype: float64
+Min Bayes factors oDAn2 DPY19L1   -1.197052
+Name: bayes_factor, dtype: float64 TDG    1.775982
+Name: bayes_factor, dtype: float64
+Min Bayes factors oDAn3 ARPC4   -1.779216
+Name: bayes_factor, dtype: float64 PPP1R3E    1.949572
+Name: bayes_factor, dtype: float64
+#+end_example
+
+** Metascape
+
+#+begin_src shell
+metascape /home/main/current_work/organoids/21.07.15_scrnaseq-midbrain-organoids/diffexp/celltype-marker-genes/marker-genes-collated-mono-unt-celltype.csv
+metascape /home/main/current_work/organoids/21.07.15_scrnaseq-midbrain-organoids/diffexp/cluster-marker-genes/marker-genes-collated-mono-unt-clusters.csv
+#+end_src
+
+
+* Dataset Integrations
+:PROPERTIES:
+:header-args:python: :async yes :session ./kernels/gpu-ssh.json :noweb yes
+:END:
+This code ran in a server environment where NVIDIA gpu acceleration is possible
+** Monoculture untreated with whole dataset
+
+** Culture level integration with 2D in-vitro model
+#+name: initialize_2D_3D_objects
+#+begin_src python
+<<init_hpc_env>>
+
+prefix = 'integration-3d-2d-last'
+
+# model_params = {"n_hidden" : 256,
+#                 "n_layers" : 1,
+#                 "n_latent" : 6,
+#                 "dispersion" : 'gene-batch'}
+
+model_params = {"n_hidden" : 512,
+                "n_layers" : 2,
+                "n_latent" : 8,
+                "dispersion" : 'gene-batch'}
+
+params = '-'.join([ k + str(v) for k,v in model_params.items()])
+
+
+object_location = '../curated-objects/' + prefix + '.h5ad'
+model_location = 'model/' + prefix + '/'
+
+# 2D in-vitro dataset
+ann = sc.read_h5ad('../fernandes-2d-wt-model.h5ad')
+## Update slot with raw unprocessed data
+ann.X = ann.raw.X
+sc.pp.calculate_qc_metrics(ann, inplace = True)
+ann.obs['fernandes-celltype'] = ann.obs["Cell Type"]
+## Filter lowly expressed genes
+ann = ann[:,ann.var['n_cells_by_counts'] > ann.n_obs/1000]
+
+# 3D in-vitro dataset
+ann_local = sc.read_h5ad('../curated-objects/mono-unt-celltypes.h5ad')
+sc.pp.calculate_qc_metrics(ann_local, inplace = True)
+ann_local.obs['ansari-celltype'] = ann_local.obs["Cell Type"]
+ann_local = ann_local[:,ann_local.var['n_cells_by_counts'] > ann_local.n_obs/1000]
+ann_all = sc.AnnData.concatenate(ann, ann_local)
+
+ann_all.obs['mito'] = ann_all.obs['percent_mito'].combine_first(ann_all.obs.pct_counts_mito)
+scvi.model.SCVI.setup_anndata(ann_all,
+                              batch_key="batch",
+                              continuous_covariate_keys = ["mito"])
+
+#+end_src
+
+#+RESULTS: initialize_2D_3D_objects
+#+begin_example
+/rds/project/rds-rVgVnOsvADI/scvi
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/compat/__init__.py:183: FutureWarning: Moving element from .uns['neighbors']['distances'] to .obsp['distances'].
+
+This is where adjacency matrices should go now.
+  FutureWarning,
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/compat/__init__.py:183: FutureWarning: Moving element from .uns['neighbors']['connectivities'] to .obsp['connectivities'].
+
+This is where adjacency matrices should go now.
+  FutureWarning,
+[34mINFO    [0m Using batches from adata.obs[1m[[0m[32m"batch"[0m[1m][0m                                               
+[34mINFO    [0m No label_key inputted, assuming all cells have same label                           
+[34mINFO    [0m Using data from adata.X                                                             
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/merge.py:898: UserWarning: Only some AnnData objects have `.raw` attribute, not concatenating `.raw` attributes.
+  UserWarning,
+[34mINFO    [0m Successfully registered anndata object containing [1;36m21802[0m cells, [1;36m13411[0m vars, [1;36m2[0m        
+         batches, [1;36m1[0m labels, and [1;36m0[0m proteins. Also registered [1;36m0[0m extra categorical covariates   
+         and [1;36m1[0m extra continuous covariates.                                                  
+[34mINFO    [0m Please do not further modify adata until model is trained.                          
+#+end_example
+
+#+name: train_model_integration_and_export
+#+begin_src python
+vae = scvi.model.SCVI(ann_all, **model_params)
+vae.train()
+
+## Serialize the model on disk
+print("Saving to ", model_location)
+vae.save(model_location, overwrite = True)
+
+ann_all.obsm['X_scVI'] = vae.get_latent_representation()
+print('Calculating Neighbors')
+sc.pp.neighbors(ann_all, use_rep="X_scVI")
+print('Calculating Umap')
+sc.tl.umap(ann_all, min_dist=0.3)
+
+if "scrublet_singlet" in ann_all.obs:
+    del ann_all.obs["scrublet_singlet"]
+
+print('Dumping object', object_location)
+ann_all.write(object_location)
+#+end_src
+
+#+RESULTS: train_model_integration_and_export
+#+begin_example
+GPU available: True, used: True
+TPU available: False, using: 0 TPU cores
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Set SLURM handle signals.
+Epoch 367/367: 100%|██████████████████████████████████████████████████████████████████████████████████████████████| 367/367 [09:41<00:00,  1.58s/it, loss=8.73e+03, v_num=1]
+Saving to  model/integration-3d-2d-last/
+Calculating Neighbors
+Calculating Umap
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'genotype' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'celltype' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'Cell Type' as categorical
+Dumping object ../curated-objects/integration-3d-2d-last.h5ad
+#+end_example
+
+#+RESULTS: train_model_integration_export
+: GPU available: True, used: True
+: TPU available: False, using: 0 TPU cores
+: LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+: Set SLURM handle signals.
+: Epoch 367/367: 100%|██████████████████████████████████████████████████████████████████████████████████████████████| 367/367 [07:48<00:00,  1.28s/it, loss=8.89e+03, v_num=1]
+: Saving to  model/integration-3d-2d-last/
+: Calculating Neighbors
+: Calculating Umap
+
+
+#+name: export_merged_object
+#+begin_src python
+
+sc.pl.umap(ann_all, color = ['ansari-celltype', 'fernandes-celltype', 'batch'])
+#+end_src
+
+#+RESULTS: export_merged_object
+[[file:./.ob-jupyter/b7db649acccea2e077ad46afe247d9db5d940944.png]]
+
+*** Export to Seurat
+:PROPERTIES:
+:header-args:python: :async yes :session seurat-conversion*python* :noweb yes
+:header-args:R: :async :session seurat-conversion*R* :noweb yes
+:END:
+#+begin_src python
+<<imports_local>>
+<<functions_local>>
+ann = sc.read('curated-objects/integration-3d-2d-last.h5ad')
+write_loom(ann, "seurat-conversion/integration-3d-2d/")
+#+end_src
+
+#+RESULTS:
+: The loom file will lack these fields:
+: {'X_umap', '_scvi_extra_continuous', 'X_scVI'}
+: Use write_obsm_varm=True to export multi-dimensional annotations
+: Writing obsm scVI
+: Writing obsm umap
+: Saved in seurat-conversion/integration-3d-2d/ directory
+
+#+begin_src R
+<<functionsR>>
+loom.to.Seurat("seurat-conversion/integration-3d-2d", import.obsm = c("UMAP", "SCVI"), idents = 'Cell.Type')
+#+end_src
+
+#+RESULTS:
+
+
+** Neuronal Integrations with atlases
+
+This block is meant to be loaded after [[*Export individual dataset objects][Export individual dataset objects]] has been executed
+#+name:read_neuron_objects
+#+begin_src python
+
+wang_neurons = sc.read("../curated-objects/wang_neurons.h5ad")
+ansari_neurons = sc.read("../curated-objects/ansari_neurons.h5ad")
+fernandes_neurons = sc.read("../curated-objects/fernandes_neurons.h5ad")
+fiorenzano_neurons = sc.read("../curated-objects/fiorenzano_neurons.h5ad")
+#+end_src
+
+#+name: in_vivo_integration_globals
+#+begin_src python
+files = ["wang-ansari",
+         "wang-fernandes",
+         "wang-fiorenzano"]
+
+label = "n_hidden.512-n_layers.2-n_latent.8-dispersion.gene-batch"
+
+param_grid = dict(n_hidden = 512,
+                  n_layers = 2,
+                  n_latent = 8,
+                  dispersion = 'gene-batch')
+
+covars = dict(batch_key = 'batch')
+
+#+end_src
+
+
+*** Export individual dataset objects 
+CLOSED: [2022-09-25 Sun 16:24]
+#+name: read_datasets_hpc
+#+begin_src python
+
+<<init_hpc_env>>
+<<integration_functions>>
+fiorenzano = sc.read("../curated-objects/fiorenzano-organoids-day60-sample-correction.h5ad")
+fernandes = sc.read_h5ad('../fernandes-2d-wt-model.h5ad')
+ansari = sc.read_h5ad('../curated-objects/mono-unt-celltypes.h5ad')
+wang = sc.read("../curated-objects/snpc-atlas-ctrl.h5ad")
+#+end_src
+
+#+RESULTS: read_datasets_hpc
+: /rds/project/rds-rVgVnOsvADI/scvi
+: /home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/compat/__init__.py:183: FutureWarning: Moving element from .uns['neighbors']['distances'] to .obsp['distances'].
+: 
+: This is where adjacency matrices should go now.
+:   FutureWarning,
+: /home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/compat/__init__.py:183: FutureWarning: Moving element from .uns['neighbors']['connectivities'] to .obsp['connectivities'].
+: 
+: This is where adjacency matrices should go now.
+:   FutureWarning,
+
+
+#+name: neuron_objects
+#+begin_src python
+<<read_datasets_hpc>>
+def process_neuron(ann, louvain_res = 0.4, rep = "X_scVI"):
+    norm(ann)
+    sc.pp.neighbors(ann, use_rep = rep)
+    sc.tl.umap(ann)
+    sc.tl.louvain(ann, resolution = louvain_res)
+    return ann
+
+
+fiorenzano.obs['batch'] = 'fiorenzano'
+fiorenzano.obs['fiorenzano-celltype'] = fiorenzano.obs['celltypes']
+
+fiorenzano.var['mito'] = fiorenzano.var_names.str.startswith('MT-')
+sc.pp.calculate_qc_metrics(fiorenzano, qc_vars = ['mito'], inplace = True)
+fiorenzano = fiorenzano[:,fiorenzano.var['n_cells_by_counts'] > fiorenzano.n_obs/1000].copy()
+
+fiorenzano_neurons = process_neuron(fiorenzano[fiorenzano.obs['fiorenzano-celltype'] == 'Dopamine neurons'].copy(), louvain_res = 0.25)
+fiorenzano_neurons.obs['fiorenzano-celltype'] = fiorenzano_neurons.obs['louvain'].apply(lambda x : 'D60_'+ x)
+
+fernandes.X = fernandes.raw.X
+fernandes.obs['batch'] = 'fernandes-2d'
+fernandes.obs['fernandes-celltype'] = fernandes.obs['Cell Type']
+
+fernandes.var['mito'] = fernandes.var_names.str.startswith('MT-')
+sc.pp.calculate_qc_metrics(fernandes, qc_vars = ['mito'], inplace = True)
+fernandes = fernandes[:,fernandes.var['n_cells_by_counts'] > fernandes.n_obs/1000]
+
+fernandes_neurons = process_neuron(fernandes[fernandes.obs['fernandes-celltype'].str.startswith('DAn')].copy(), rep = None)
+
+
+ansari.obs['batch'] = 'ansari'
+ansari.obs['ansari-celltype'] = ansari.obs['Cell Type']
+if 'scrublet_singlet' in ansari.obs.columns:
+    del ansari.obs['scrublet_singlet']
+
+ansari.var['mito'] = ansari.var_names.str.startswith('MT-')
+sc.pp.calculate_qc_metrics(ansari, qc_vars = ['mito'], inplace = True)
+ansari = ansari[:,ansari.var['n_cells_by_counts'] > ansari.n_obs/1000].copy()
+
+
+ansari_neurons = process_neuron(ansari[ansari.obs['ansari-celltype'].str.startswith('oDAn') | ansari.obs['ansari-celltype'].str.startswith('NEU')].copy())
+
+
+wang.obs['batch'] = 'wang'
+# wang.obs['wang-celltype'] = wang.obs['celltypes']
+
+wang.obs['type'] = "other"
+wang.obs.loc[wang.obs['louvain'].isin(['2', '6', '9']), 'type'] = 'neuron'
+## This following is the annotation of the data which is wrong we had to redo clustering
+#wang.obs.loc[wang.obs['louvain'].isin(['6', '7', '9']), 'type'] = 'neuron'
+
+wang.obs['wang-celltype'] = wang.obs['louvain']
+wang = wang[:,wang.var['n_cells_by_counts'] > wang.n_obs/1000].copy()
+wang_neurons = process_neuron(wang[wang.obs['type'] == 'neuron'].copy())
+
+#+end_src
+
+#+RESULTS: neuron_objects
+: /rds/project/rds-rVgVnOsvADI/scvi
+: /home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/compat/__init__.py:183: FutureWarning: Moving element from .uns['neighbors']['distances'] to .obsp['distances'].
+: 
+: This is where adjacency matrices should go now.
+:   FutureWarning,
+: /home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/compat/__init__.py:183: FutureWarning: Moving element from .uns['neighbors']['connectivities'] to .obsp['connectivities'].
+: 
+: This is where adjacency matrices should go now.
+:   FutureWarning,
+
+#+name: write_neuronal objects
+#+begin_src python
+wang_neurons.write("../curated-objects/wang_neurons.h5ad")
+ansari_neurons.write("../curated-objects/ansari_neurons.h5ad")
+fernandes_neurons.write("../curated-objects/fernandes_neurons.h5ad")
+fiorenzano_neurons.write("../curated-objects/fiorenzano_neurons.h5ad")
+#+end_src
+
+#+RESULTS:
+#+begin_example
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'batch' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'type' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'batch' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'batch' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'batch' as categorical
+#+end_example
+
+
+*** Perform integrations with in-vivo and 2-way label transfer
+CLOSED: [2022-09-25 Sun 20:27]
+
+#+begin_src python
+<<read_neuron_objects>>
+<<in_vivo_integration_globals>>
+!date
+anns_neurons = dict(fiorenzano = fiorenzano_neurons.copy(),
+                    fernandes = fernandes_neurons.copy(),
+                    ansari = ansari_neurons.copy(),
+                    wang = wang_neurons.copy())
+
+
+
+
+batch_datasets = {'wang-fiorenzano':['donor','orig.ident'], 'wang-ansari': ['donor','genotype'], 'wang-fernandes': ['donor']}
+
+predicate = 'train_data'
+unknown_label = 'Unknown'
+for f in files:
+    ann = anns[f]
+    model_location = 'gridscan/gridscan-models/' + f + '__' + label
+    print(f)
+    if f in batch_datasets.keys():
+        covars['categorical_covariate_keys'] = batch_datasets[f]
+        for c in covars['categorical_covariate_keys']:
+            ann.obs[c] = ann.obs[c].astype(str).astype('category')
+    for dataset in f.split("-"):
+        print('Label:', dataset)
+        transfer_label = dataset + "-celltype"
+        mask = ~ann.obs[transfer_label].isna()
+        ann.obs[predicate] = unknown_label
+        ann.obs.loc[mask, predicate] = ann.obs[transfer_label][mask].values
+        scvi.model.SCANVI.setup_anndata(ann, labels_key = predicate, **covars)
+        lvae = scvi.model.SCANVI(ann, unknown_label, **param_grid)
+        lvae.train()
+
+        model_save_location = model_location + "__SCANVI-" + dataset + "_prediction"
+        lvae.save(model_save_location, overwrite = True)
+        ann.obs[dataset + "_prediction"] = lvae.predict(ann)
+
+<<dump_labelled_files>>
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+#+begin_example
+Sun Sep 25 16:31:53 BST 2022
+wang-ansari
+Label: wang
+[34mINFO    [0m Using batches from adata.obs[1m[[0m[32m"batch"[0m[1m][0m                                               
+[34mINFO    [0m Using labels from adata.obs[1m[[0m[32m"train_data"[0m[1m][0m                                           
+[34mINFO    [0m Using data from adata.X                                                             
+[34mINFO    [0m Successfully registered anndata object containing [1;36m27610[0m cells, [1;36m14342[0m vars, [1;36m2[0m        
+         batches, [1;36m4[0m labels, and [1;36m0[0m proteins. Also registered [1;36m2[0m extra categorical covariates   
+         and [1;36m0[0m extra continuous covariates.                                                  
+[34mINFO    [0m Please do not further modify adata until model is trained.                          
+[34mINFO    [0m Training for [1;36m290[0m epochs.                                                            
+GPU available: True, used: True
+TPU available: False, using: 0 TPU cores
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Set SLURM handle signals.
+Epoch 290/290: 100%|██████████████████████████████████████████████████████████████████████████████████████████████| 290/290 [19:32<00:00,  4.04s/it, loss=6.43e+03, v_num=1]
+Label: ansari
+[34mINFO    [0m Using batches from adata.obs[1m[[0m[32m"batch"[0m[1m][0m                                               
+[34mINFO    [0m Using labels from adata.obs[1m[[0m[32m"train_data"[0m[1m][0m                                           
+[34mINFO    [0m Using data from adata.X                                                             
+[34mINFO    [0m Successfully registered anndata object containing [1;36m27610[0m cells, [1;36m14342[0m vars, [1;36m2[0m        
+         batches, [1;36m6[0m labels, and [1;36m0[0m proteins. Also registered [1;36m2[0m extra categorical covariates   
+         and [1;36m0[0m extra continuous covariates.                                                  
+[34mINFO    [0m Please do not further modify adata until model is trained.                          
+[34mINFO    [0m Training for [1;36m290[0m epochs.                                                            
+GPU available: True, used: True
+TPU available: False, using: 0 TPU cores
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Set SLURM handle signals.
+Epoch 290/290: 100%|██████████████████████████████████████████████████████████████████████████████████████████████| 290/290 [20:18<00:00,  4.20s/it, loss=6.46e+03, v_num=1]
+wang-fernandes
+Label: wang
+[34mINFO    [0m Using batches from adata.obs[1m[[0m[32m"batch"[0m[1m][0m                                               
+[34mINFO    [0m Using labels from adata.obs[1m[[0m[32m"train_data"[0m[1m][0m                                           
+[34mINFO    [0m Using data from adata.X                                                             
+[34mINFO    [0m Successfully registered anndata object containing [1;36m14898[0m cells, [1;36m13296[0m vars, [1;36m2[0m        
+         batches, [1;36m4[0m labels, and [1;36m0[0m proteins. Also registered [1;36m1[0m extra categorical covariates   
+         and [1;36m0[0m extra continuous covariates.                                                  
+[34mINFO    [0m Please do not further modify adata until model is trained.                          
+[34mINFO    [0m Training for [1;36m400[0m epochs.                                                            
+GPU available: True, used: True
+TPU available: False, using: 0 TPU cores
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Set SLURM handle signals.
+Epoch 400/400: 100%|██████████████████████████████████████████████████████████████████████████████████████████████| 400/400 [14:22<00:00,  2.16s/it, loss=4.63e+03, v_num=1]
+Label: fernandes
+[34mINFO    [0m Using batches from adata.obs[1m[[0m[32m"batch"[0m[1m][0m                                               
+[34mINFO    [0m Using labels from adata.obs[1m[[0m[32m"train_data"[0m[1m][0m                                           
+[34mINFO    [0m Using data from adata.X                                                             
+[34mINFO    [0m Successfully registered anndata object containing [1;36m14898[0m cells, [1;36m13296[0m vars, [1;36m2[0m        
+         batches, [1;36m5[0m labels, and [1;36m0[0m proteins. Also registered [1;36m1[0m extra categorical covariates   
+         and [1;36m0[0m extra continuous covariates.                                                  
+[34mINFO    [0m Please do not further modify adata until model is trained.                          
+[34mINFO    [0m Training for [1;36m400[0m epochs.                                                            
+GPU available: True, used: True
+TPU available: False, using: 0 TPU cores
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Set SLURM handle signals.
+Epoch 400/400: 100%|████████████████████████████████████| 400/400 [13:27<00:00,  2.02s/it, loss=4.45e+03, v_num=1]
+wang-fiorenzano
+Label: wang
+[34mINFO    [0m Using batches from adata.obs[1m[[0m[32m"batch"[0m[1m][0m                                               
+[34mINFO    [0m Using labels from adata.obs[1m[[0m[32m"train_data"[0m[1m][0m                                           
+[34mINFO    [0m Using data from adata.X                                                             
+[34mINFO    [0m Successfully registered anndata object containing [1;36m18952[0m cells, [1;36m15777[0m vars, [1;36m2[0m        
+         batches, [1;36m4[0m labels, and [1;36m0[0m proteins. Also registered [1;36m2[0m extra categorical covariates   
+         and [1;36m0[0m extra continuous covariates.                                                  
+[34mINFO    [0m Please do not further modify adata until model is trained.                          
+[34mINFO    [0m Training for [1;36m400[0m epochs.                                                            
+GPU available: True, used: True
+TPU available: False, using: 0 TPU cores
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Set SLURM handle signals.
+Epoch 400/400: 100%|████████████████████████████████████| 400/400 [18:58<00:00,  2.85s/it, loss=4.42e+03, v_num=1]
+Label: fiorenzano
+[34mINFO    [0m Using batches from adata.obs[1m[[0m[32m"batch"[0m[1m][0m                                               
+[34mINFO    [0m Using labels from adata.obs[1m[[0m[32m"train_data"[0m[1m][0m                                           
+[34mINFO    [0m Using data from adata.X                                                             
+[34mINFO    [0m Successfully registered anndata object containing [1;36m18952[0m cells, [1;36m15777[0m vars, [1;36m2[0m        
+         batches, [1;36m4[0m labels, and [1;36m0[0m proteins. Also registered [1;36m2[0m extra categorical covariates   
+         and [1;36m0[0m extra continuous covariates.                                                  
+[34mINFO    [0m Please do not further modify adata until model is trained.                          
+[34mINFO    [0m Training for [1;36m400[0m epochs.                                                            
+GPU available: True, used: True
+TPU available: False, using: 0 TPU cores
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Set SLURM handle signals.
+Epoch 400/400: 100%|████████████████████████████████████| 400/400 [18:32<00:00,  2.78s/it, loss=4.37e+03, v_num=1]
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'train_data' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'wang_prediction' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'ansari_prediction' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'train_data' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'wang_prediction' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'fernandes_prediction' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'train_data' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'wang_prediction' as categorical
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/anndata/_core/anndata.py:1220: FutureWarning: The `inplace` parameter in pandas.Categorical.reorder_categories is deprecated and will be removed in a future version. Reordering categories will always return a new Categorical object.
+  c.reorder_categories(natsorted(c.categories), inplace=True)
+... storing 'fiorenzano_prediction' as categorical
+#+end_example
+:END:
+
+#+name: dump_labelled_files
+#+begin_src python
+for f in files:
+    ann = anns[f]
+    ann.write_h5ad("gridscan/"+f+"__"+label+"__labels.h5ad")
+#+end_src
+
+
+
+
+
+*** Merge annotations in objects
+CLOSED: [2022-09-25 Sun 20:27]
+
+#+begin_src python
+<<read_neuron_objects>>
+<<in_vivo_integration_globals>>
+anns_neurons = dict(fiorenzano = fiorenzano_neurons.copy(), fernandes = fernandes_neurons.copy(), ansari = ansari_neurons.copy(), wang = wang_neurons.copy())
+
+if not "anns" in globals():
+    anns = {}
+for f in files:
+    print("Reading:", f)
+    anns[f] = sc.read("gridscan/"+f+"__"+label+"__labels.h5ad")
+
+## Update individual data set predictions from the data of the combined objects
+for f in files:
+    d1, d2 = f.split("-")
+    dataset_map = {d1 : d2, d2 : d1}
+    df_labels = anns[f].obs.copy()
+    ds_obs = dict(list(df_labels.groupby('batch')))
+    for k, obs in ds_obs.items():
+        _obs = obs.copy()
+        _obs.index = list(map(lambda x : '-'.join(x[:-1]), _obs.index.str.split("-")))
+        ds_obs[k] = _obs
+            
+    for name, obs in ds_obs.items():
+        # print(obs[name + "_prediction"])
+        if name == 'fernandes-2d':
+            name = 'fernandes'
+        anns_neurons[name].obs[dataset_map[name] + "_prediction"] = obs[dataset_map[name] + "_prediction"]
+
+
+## Write objects
+for f,ann in anns_neurons.items():
+    print("Writing", f, "with annotations")
+    ann.write_h5ad("label_transfer/"+f+"__"+label+"_annotated.h5ad")
+
+#+end_src
+
+#+RESULTS:
+#+begin_example
+Reading: wang-ansari
+WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__labels', '.h5ad'].
+Only considering the two last: ['.gene-batch__labels', '.h5ad'].
+WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__labels', '.h5ad'].
+Only considering the two last: ['.gene-batch__labels', '.h5ad'].
+Reading: wang-fernandes
+WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__labels', '.h5ad'].
+Only considering the two last: ['.gene-batch__labels', '.h5ad'].
+WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__labels', '.h5ad'].
+Only considering the two last: ['.gene-batch__labels', '.h5ad'].
+Reading: wang-fiorenzano
+WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__labels', '.h5ad'].
+Only considering the two last: ['.gene-batch__labels', '.h5ad'].
+WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__labels', '.h5ad'].
+Only considering the two last: ['.gene-batch__labels', '.h5ad'].
+Writing fiorenzano with annotations
+Writing fernandes with annotations
+Writing ansari with annotations
+Writing wang with annotations
+#+end_example
+
+Show some visualizations with the results
+#+begin_src python
+
+for f,ann in anns_neurons.items():
+    cols = list(ann.obs.columns[ann.obs.columns.str.endswith("_prediction")])
+    ct = f + '-celltype'
+    
+    sc.pl.umap(ann, color = [ct] + cols)
+    
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+[[file:./.ob-jupyter/a5ad94fa7b5bf3e2d3a9788ed982220954345f5c.png]]
+[[file:./.ob-jupyter/bbc57030d0a796b50018294480a7ca46dcb49d59.png]]
+[[file:./.ob-jupyter/b6a01e0909d4fbcfcc22e66538ae23b95d5857e6.png]]
+[[file:./.ob-jupyter/bd723ad090414a83baeb3197d450cb3d12ecd66c.png]]
+:END:
+
+
+#+begin_src python
+
+for k, _ann in anns.items():
+    # print(k, _ann.obs.columns)
+    d1, d2 = k.split("-")
+    model_location = 'gridscan/gridscan-models/' + k + '__' + label
+    cols = list(_ann.obs.columns[_ann.obs.columns.str.endswith("-celltype")])
+    model_path = model_location + "__SCANVI-" + d2 + "_prediction"
+    lvae = scvi.model.SCANVI.load(model_path, adata = _ann)
+    _ann.obsm["X_scANVI"] = lvae.get_latent_representation()
+    sc.pp.neighbors(_ann, use_rep = "X_scANVI")
+    sc.tl.umap(_ann, min_dist = 0.3)
+    sc.pl.umap(_ann, color = ['dataset'] + cols)
+    
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: [34mINFO    [0m Using data from adata.X                                                             
+: [34mINFO    [0m Registered keys:[1m[[0m[32m'X'[0m, [32m'batch_indices'[0m, [32m'labels'[0m, [32m'cat_covs'[0m[1m][0m                        
+: [34mINFO    [0m Successfully registered anndata object containing [1;36m27610[0m cells, [1;36m14342[0m vars, [1;36m2[0m        
+:          batches, [1;36m6[0m labels, and [1;36m0[0m proteins. Also registered [1;36m2[0m extra categorical covariates   
+:          and [1;36m0[0m extra continuous covariates.                                                  
+[[file:./.ob-jupyter/50ca021e2308096ab3da1705441cd4bd4f08ab16.png]]
+: [34mINFO    [0m Using data from adata.X                                                             
+: /home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/sklearn/utils/deprecation.py:87: FutureWarning: Function transfer_anndata_setup is deprecated; This method will be removed in 0.15.0. Please avoid building any new dependencies on it.
+:   warnings.warn(msg, category=FutureWarning)
+: [34mINFO    [0m Registered keys:[1m[[0m[32m'X'[0m, [32m'batch_indices'[0m, [32m'labels'[0m, [32m'cat_covs'[0m[1m][0m                        
+: [34mINFO    [0m Successfully registered anndata object containing [1;36m14898[0m cells, [1;36m13296[0m vars, [1;36m2[0m        
+:          batches, [1;36m5[0m labels, and [1;36m0[0m proteins. Also registered [1;36m1[0m extra categorical covariates   
+:          and [1;36m0[0m extra continuous covariates.                                                  
+[[file:./.ob-jupyter/0eeac2080d2a67f4bc83d58a861dfdb57f0e1e28.png]]
+: [34mINFO    [0m Using data from adata.X                                                             
+: /home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/sklearn/utils/deprecation.py:87: FutureWarning: Function transfer_anndata_setup is deprecated; This method will be removed in 0.15.0. Please avoid building any new dependencies on it.
+:   warnings.warn(msg, category=FutureWarning)
+: [34mINFO    [0m Registered keys:[1m[[0m[32m'X'[0m, [32m'batch_indices'[0m, [32m'labels'[0m, [32m'cat_covs'[0m[1m][0m                        
+: [34mINFO    [0m Successfully registered anndata object containing [1;36m18952[0m cells, [1;36m15777[0m vars, [1;36m2[0m        
+:          batches, [1;36m4[0m labels, and [1;36m0[0m proteins. Also registered [1;36m2[0m extra categorical covariates   
+:          and [1;36m0[0m extra continuous covariates.                                                  
+[[file:./.ob-jupyter/539fc489427fa6b02262cb44c40501fda3fce353.png]]
+:END:
+
+#+begin_src python
+
+for k, _ann in anns.items():
+    print(k)
+    d1, d2 = k.split("-")
+    model_location = 'gridscan/gridscan-models/' + k + '__' + label
+    _ann.write_h5ad("gridscan/"+f+"__"+label+"__SCANVI_full_"+d2+"labels.h5ad")
+
+#+end_src
+
+#+RESULTS:
+: wang-ansari
+: wang-fernandes
+: wang-fiorenzano
+
+
+#+begin_src python
+<<init_hpc_env>>
+<<integration_functions>>
+files = [
+"ansari",
+    "fiorenzano",
+    "fernandes"
+]
+
+for f in files:
+    _ann = sc.read('gridscan/wang__n_hidden.512-n_layers.2-n_latent.8-dispersion.gene-batch__SCANVI_full_'+f+'labels.h5ad')
+    norm(_ann)
+    cols = list(_ann.obs.columns[_ann.obs.columns.str.endswith("-celltype")])
+    sc.pl.umap(_ann, color = cols + ["batch", "TH"], layer = 'lognorm_counts', color_map = 'magma', wspace = 0.2, legend_fontsize = 13, save = 'integration-wang-merge-'+f+'.pdf')
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: Global seed set to 69
+: /rds/project/rds-rVgVnOsvADI/scvi
+: WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__SCANVI_full_ansarilabels', '.h5ad'].
+: Only considering the two last: ['.gene-batch__SCANVI_full_ansarilabels', '.h5ad'].
+: WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__SCANVI_full_ansarilabels', '.h5ad'].
+: Only considering the two last: ['.gene-batch__SCANVI_full_ansarilabels', '.h5ad'].
+: WARNING: saving figure to file figures/umapintegration-wang-merge-ansari.pdf
+[[file:./.ob-jupyter/57b05ef06490f10cbe14e30eab6c309f2147cb7c.png]]
+: WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__SCANVI_full_fiorenzanolabels', '.h5ad'].
+: Only considering the two last: ['.gene-batch__SCANVI_full_fiorenzanolabels', '.h5ad'].
+: WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__SCANVI_full_fiorenzanolabels', '.h5ad'].
+: Only considering the two last: ['.gene-batch__SCANVI_full_fiorenzanolabels', '.h5ad'].
+: WARNING: saving figure to file figures/umapintegration-wang-merge-fiorenzano.pdf
+[[file:./.ob-jupyter/4fe7fae74a867c52f8f0f21f4e5d55b260b44a1e.png]]
+: WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__SCANVI_full_fernandeslabels', '.h5ad'].
+: Only considering the two last: ['.gene-batch__SCANVI_full_fernandeslabels', '.h5ad'].
+: WARNING: Your filename has more than two extensions: ['.512-n_layers', '.2-n_latent', '.8-dispersion', '.gene-batch__SCANVI_full_fernandeslabels', '.h5ad'].
+: Only considering the two last: ['.gene-batch__SCANVI_full_fernandeslabels', '.h5ad'].
+: WARNING: saving figure to file figures/umapintegration-wang-merge-fernandes.pdf
+[[file:./.ob-jupyter/752d8bc1f4f20a255c6e09d23b67b13d5027ebe4.png]]
+:END:
+
+
+
+
+*** Export to Seurat
+:PROPERTIES:
+:header-args:python: :async yes :session seurat-conversion*python* :noweb yes
+:header-args:R: :async :session seurat-conversion*R* :noweb yes
+:END:
+
+**** Wang
+#+begin_src python
+<<imports_local>>
+<<functions_local>>
+ann = sc.read('curated-objects/neuron_objects_integrations/wang_annotated.h5ad')
+write_loom(ann, "seurat-conversion/wang_annotated/")
+#+end_src
+
+#+RESULTS:
+: The loom file will lack these fields:
+: {'X_umap', 'X_scVI', '_scvi_extra_categoricals'}
+: Use write_obsm_varm=True to export multi-dimensional annotations
+: Writing obsm scVI
+: Writing obsm umap
+: Saved in seurat-conversion/wang_annotated/ directory
+
+#+begin_src R
+<<functionsR>>
+loom.to.Seurat("seurat-conversion/wang_annotated", import.obsm = c("UMAP", "SCVI"), idents = 'wang.celltype')
+#+end_src
+
+#+RESULTS:
+
+**** Ansari
+#+begin_src python
+<<imports_local>>
+<<functions_local>>
+ann = sc.read('curated-objects/neuron_objects_integrations/ansari_annotated.h5ad')
+write_loom(ann, "seurat-conversion/ansari_annotated/")
+#+end_src
+
+#+RESULTS:
+: The loom file will lack these fields:
+: {'X_umap', '_scvi_extra_continuous', 'X_scVI', '_scvi_extra_categoricals'}
+: Use write_obsm_varm=True to export multi-dimensional annotations
+: Writing obsm scVI
+: Writing obsm umap
+: Saved in seurat-conversion/ansari_annotated/ directory
+
+#+begin_src R
+<<functionsR>>
+loom.to.Seurat("seurat-conversion/ansari_annotated", import.obsm = c("UMAP", "SCVI"), idents = 'ansari.celltype')
+#+end_src
+
+#+RESULTS:
+
+
+**** Fiorenzano
+#+begin_src python
+<<imports_local>>
+<<functions_local>>
+ann = sc.read('curated-objects/neuron_objects_integrations/fiorenzano_annotated.h5ad')
+write_loom(ann, "seurat-conversion/fiorenzano_annotated/")
+#+end_src
+
+#+RESULTS:
+: The loom file will lack these fields:
+: {'X_scVI', 'X_HARMONY_UMAP', 'X_umap', '_scvi_extra_categoricals', '_scvi_extra_continuous'}
+: Use write_obsm_varm=True to export multi-dimensional annotations
+: Writing obsm scVI
+: Writing obsm umap
+: Saved in seurat-conversion/fiorenzano_annotated/ directory
+
+#+begin_src R
+<<functionsR>>
+loom.to.Seurat("seurat-conversion/fiorenzano_annotated", import.obsm = c("UMAP", "SCVI"), idents = 'fiorenzano.celltype')
+#+end_src
+
+#+RESULTS:
+
+
+
+* /SNCA-3x/ neuronal phenotype
+** Differential expression
+CLOSED: [2022-09-25 Sun 15:55]
+:PROPERTIES:
+:header-args:python: :async yes :session ./kernels/gpu-ssh.json :noweb yes
+:END:
+
+#+name: differential_expression_snca3x
+#+begin_src python
+<<init_hpc_env>>
+ann = sc.read_h5ad("../curated-objects/mono-unt-celltypes.h5ad")
+
+vae = scvi.model.SCVI.load('models/mono-culture-unt/', adata = ann)
+
+
+
+odan1_3x = (ann.obs["Cell Type"] == "oDAn1") & (ann.obs["genotype"] == "SNCA-3x")
+odan1_corr = (ann.obs["Cell Type"] == "oDAn1") & (ann.obs["genotype"] == "SNCA-corr")
+
+genes = vae.differential_expression(adata=ann,
+                                    idx1=odan1_3x,
+                                    idx2=odan1_corr,
+                                    mode='vanilla',
+                                    fdr_target=0.05)
+
+#+end_src
+
+#+RESULTS: differential_expression_snca3x
+#+begin_example
+/rds/project/rds-rVgVnOsvADI/scvi
+[34mINFO    [0m Using data from adata.X                                                             
+/home/np504/miniconda3/envs/scvi/lib/python3.7/site-packages/sklearn/utils/deprecation.py:87: FutureWarning: Function transfer_anndata_setup is deprecated; This method will be removed in 0.15.0. Please avoid building any new dependencies on it.
+  warnings.warn(msg, category=FutureWarning)
+[34mINFO    [0m Registered keys:[1m[[0m[32m'X'[0m, [32m'batch_indices'[0m, [32m'labels'[0m, [32m'cat_covs'[0m, [32m'cont_covs'[0m[1m][0m           
+[34mINFO    [0m Successfully registered anndata object containing [1;36m19157[0m cells, [1;36m20584[0m vars, [1;36m1[0m        
+         batches, [1;36m3[0m labels, and [1;36m0[0m proteins. Also registered [1;36m1[0m extra categorical covariates   
+         and [1;36m1[0m extra continuous covariates.                                                  
+DE...: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:07<00:00,  7.99s/it]
+#+end_example
+
+#+begin_src python :pandoc t
+genes.sort_values(by="proba_m1", ascending=False).to_csv("diffexp/oDAn1-SNCA-3x-vs-SNCA-corr/SNCA-3x-vs-SNCA-corr.csv")
+genes_filtered = genes[(genes['non_zeros_proportion2'] > 0.01 ) & (genes['non_zeros_proportion1'] > 0.01 )].copy()
+genes_filtered.to_csv("diffexp/oDAn1-SNCA-3x-vs-SNCA-corr/SNCA-3x-vs-SNCA-corr-filtered.csv")
+genes_up = genes_filtered.sort_values(by="proba_m1", ascending=False).head(200)
+genes_up.to_csv("diffexp/oDAn1-SNCA-3x-vs-SNCA-corr/SNCA-3x-vs-SNCA-corr-up.csv")
+genes_down = genes_filtered.sort_values(by="proba_m2", ascending=False).head(200)
+genes_down.to_csv("diffexp/oDAn1-SNCA-3x-vs-SNCA-corr/SNCA-3x-vs-SNCA-corr-down.csv")
+#+end_src
+
+#+RESULTS:
+** Metascape analysis
+#+begin_src shell
+
+metascape_unique /home/main/current_work/organoids/21.07.15_scrnaseq-midbrain-organoids/diffexp/oDAn1-SNCA-3x-vs-SNCA-corr/SNCA-3x-vs-SNCA-corr-down.csv
+metascape_unique /home/main/current_work/organoids/21.07.15_scrnaseq-midbrain-organoids/diffexp/oDAn1-SNCA-3x-vs-SNCA-corr/SNCA-3x-vs-SNCA-corr-up.csv
+
+
+#+end_src
+
+#+RESULTS:
+
+
+
+* Rotenone pseudotime analysis
+CLOSED: [2022-09-26 Mon 11:57]
+:PROPERTIES:
+:header-args:R: :session rotenone-pseudotime*R* :async :noweb yes :rownames yes :colnames yes
+:END:
+** MASC rotenone vulnerability
+#+name: export_mono_object
+#+begin_src python
+<<imports_local>>
+
+ann = sc.read('curated-objects/all-celltypes.h5ad')
+ann_mono = ann[ann.obs['coculture'] == 'MONO'].copy()
+ann_mono.obs.to_csv('aux-files/MASC_mono-cultures-unt-rot-metadata.csv')
+#+end_src
+
+#+RESULTS: export_mono_object
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1094: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if not is_categorical(df_full[k]):
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1097: FutureWarning: The `inplace` parameter in pandas.Categorical.remove_unused_categories is deprecated and will be removed in a future version.
+:   df_sub[k].cat.remove_unused_categories(inplace=True)
+
+#+begin_src R
+library(lme4)
+<<mascR>>
+filepath <- 'aux-files/MASC_mono-cultures-unt-rot-metadata.csv'
+df <-read.csv(filepath)
+df$Cell.Type <- as.factor(df$Cell.Type)
+df$condition <- as.factor(df$condition)
+df$condition <- relevel(df$condition, ref = "UNT")
+res <- MASC(data = df, cluster = df$Cell.Type, contrast = "condition", random_effects = "genotype")
+write.csv(res, 'aux-files/MASC_mono-unt-rot-summary.csv')
+#+end_src
+
+#+RESULTS:
+: Could not parse R result
+
+
+** Pseudotime generation
+CLOSED: [2022-09-25 Sun 17:15]
+
+#+begin_src python
+<<imports_local>>
+ann = sc.read('curated-objects/all-celltypes.h5ad')
+bitmask = (ann.obs['coculture'] == 'MONO') & (ann.obs["Cell Type"] == 'oDAn1')
+
+ann_dan1 = ann[bitmask].copy()
+df_dan1_index = ann.obs_names[bitmask]
+df_dan1 = ann.obsm["X_scVI"][bitmask]
+df_dan1_obs = ann.obs[bitmask]
+
+rot_mask = df_dan1_obs.condition == 'ROT'
+unt_mask = df_dan1_obs.condition == 'UNT'
+
+rot_indices = np.where(rot_mask)[0]
+unt_indices = np.where(unt_mask)[0]
+
+## Generate a multivariate-normal
+def pmf(X):
+    sigma = np.cov(X.T)
+    mu = X.mean(axis = 0)
+    return mu, sigma
+
+rot_indices = np.where(df_dan1_obs.condition != 'UNT')[0]
+unt_indices = np.where(df_dan1_obs.condition == 'UNT')[0]
+
+
+rot_mu, rot_sigma = pmf(df_dan1[rot_indices])
+unt_mu, unt_sigma = pmf(df_dan1[unt_indices])
+
+pmf_unt = scipy.stats.multivariate_normal.pdf(df_dan1, mean =  unt_mu, cov = unt_sigma)
+pmf_rot = scipy.stats.multivariate_normal.pdf(df_dan1, mean =  rot_mu, cov = rot_sigma)
+
+
+#+end_src
+
+#+RESULTS:
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1094: FutureWarning: is_categorical is deprecated and will be removed in a future version. Use is_categorical_dtype instead.
+:   if not is_categorical(df_full[k]):
+: /home/main/analysis/miniconda3/envs/scrnaseq/lib/python3.8/site-packages/anndata/_core/anndata.py:1097: FutureWarning: The `inplace` parameter in pandas.Categorical.remove_unused_categories is deprecated and will be removed in a future version.
+:   df_sub[k].cat.remove_unused_categories(inplace=True)
+
+
+#+begin_src python
+label = 'log(pmf_rot/pmf_unt)'
+df = pd.DataFrame(np.log(pmf_rot/pmf_unt), columns = [label])
+df['condition'] = ann_dan1.obs['condition'].values
+pseudotime = sns.displot(data = df, x = label, hue = 'condition',  kde = True)
+
+ann_dan1.obs['rotenone_pseudotime'] = np.log(pmf_rot/pmf_unt)
+
+#+end_src
+
+#+RESULTS:
+[[file:./.ob-jupyter/c9705e186f245d4eca000b092e16838585918acd.png]]
+
+#+begin_src python
+<<functions_local>>
+prefix='seurat-conversion/dan1-rot-pseudotime/'
+write_loom(ann_dan1, prefix)
+
+#+end_src
+
+#+RESULTS:
+: The loom file will lack these fields:
+: {'_scvi_extra_continuous', 'X_umap', 'X_scANVI', '_scvi_extra_categoricals', 'X_scVI'}
+: Use write_obsm_varm=True to export multi-dimensional annotations
+: Writing obsm scVI
+: Writing obsm umap
+: Saved in seurat-conversion/dan1-rot-pseudotime/ directory
+
+
+#+begin_src R
+<<functionsR>>
+seu <- loom.to.Seurat("./seurat-conversion/dan1-rot-pseudotime", import.obsm=c("UMAP", "SCVI"))
+#+end_src
+
+#+RESULTS:
+
+
+** SwitchDE analysis
+#+begin_src R
+library(SingleCellExperiment)
+seu <- readRDS('seurat-conversion/dan1-rot-pseudotime.rds')
+
+## Filtering
+## 0.1 mean expression and 20% dropout cutoff
+seu <- NormalizeData(seu)
+seu <- ScaleData(seu)
+X <- as.matrix(seu@assays$RNA@data)
+X_filtered <- X[rowMeans(X) > 0.1 & rowMeans(X > 0) > 0.2, ]
+
+pseudotime <- seu[[]][["rotenone_pseudotime"]]
+sce <- SingleCellExperiment(assays = list(exprs = X_filtered))
+
+
+rot <- seu[[]]$treatment_condition == "ROT"
+1
+#+end_src
+
+#+RESULTS:
+
+
+
+#+begin_src R
+library(switchde)
+print("rot")
+sce.rot <- sce[,rot]
+sde.rot <- switchde(sce.rot, pseudotime[rot], zero_inflated = TRUE)
+print("unt")
+sce.unt <- sce[,!rot]
+sde.unt <- switchde(sce.unt, pseudotime[!rot], zero_inflated = TRUE)
+
+saveRDS(sde.unt, "switchde-unt.rds")
+saveRDS(sde.rot, "switchde-rot.rds")
+
+write.csv(sde.unt[order(abs(sde.unt$qval)), ], "switchde-unt.csv")
+write.csv(sde.rot[order(abs(sde.rot$qval)), ], "switchde-rot.csv")
+
+#+end_src
+
+#+RESULTS:
+: Could not parse R result
+
+
+#+begin_src R
+library(dplyr)
+write.csv(sde.unt %>% arrange(qval) %>% filter( k > 0), "switchde-unt-UP.csv")
+write.csv(sde.unt %>% arrange(qval) %>% filter( k < 0), "switchde-unt-DOWN.csv")
+write.csv(sde.rot %>% arrange(qval) %>% filter( k > 0), "switchde-rot-UP.csv")
+write.csv(sde.rot %>% arrange(qval) %>% filter( k < 0), "switchde-rot-DOWN.csv")
+#+end_src
+
+#+RESULTS:
+: Could not parse R result
+
+*** Collate genelists
+#+begin_src python :pandoc t
+<<imports_local>>
+
+df_files = ["switchde-unt-UP.csv",
+            "switchde-unt-DOWN.csv",
+            "switchde-rot-UP.csv",
+            "switchde-rot-DOWN.csv"]
+
+
+dfs = dict(resilient = pd.read_csv(df_files[0]),
+          sensitive = pd.read_csv(df_files[1]),
+          rotenone_down = pd.read_csv(df_files[2]),
+          rotenone_up = pd.read_csv(df_files[3])
+          )
+df = pd.DataFrame(index = list(range(1,201)))
+for k, _df in dfs.items():
+    _tmp = _df[_df["EM_converged"]]
+    df[k] = _tmp.gene.head(200).values
+
+df.to_csv("switchde-unt-rot-collated.csv", index = None)
+#+end_src
+
+#+RESULTS:
+
+** Anova genotypes
+CLOSED: [2022-09-26 Mon 11:54]
+#+begin_src R
+library(Seurat)
+
+seu <- readRDS('seurat-conversion/dan1-rot-pseudotime.rds')
+
+
+#+end_src
+
+#+RESULTS:
+|---|
+
+#+begin_src R
+library(ggplot2)
+df <- seu[[]]
+genotype.aov <- aov(rotenone_pseudotime ~ genotype*condition, data = df)
+
+## genotype.unt.aov <- aov(rotenone_pseudotime ~ genotype, data = subset(df, condition == "UNT"))
+## genotype.rot.aov <- aov(rotenone_pseudotime ~ genotype, data = subset(df, condition == "ROT"))
+
+#+end_src
+
+#+RESULTS:
+|---|
+
+#+begin_src R
+summary(genotype.aov)
+#+end_src
+
+#+RESULTS:
+|---|
+
+#+begin_example
+                     Df Sum Sq Mean Sq  F value   Pr(>F)    
+genotype              2    778     389   11.192 1.42e-05 ***
+condition             1  48401   48401 1392.027  < 2e-16 ***
+genotype:condition    2    199     100    2.868    0.057 .  
+Residuals          3964 137830      35                      
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1 
+#+end_example
+
+
+#+begin_src R
+dim(df)
+
+#+end_src
+
+#+RESULTS:
+|   |    x |
+|---+------|
+| 1 | 3970 |
+| 2 |   39 |
+
+
+* Chimeras
+** MASC rotenone vulnerability
+Export chimera associated metadata
+#+begin_src python
+
+ann = sc.read('curated-objects/all-celltypes.h5ad')
+ann.obs['10x_sample'] = ann.obs[['cellline', 'coculture', 'condition']].apply(lambda x : "_".join(x), axis=1)
+df = ann.obs[ann.obs['coculture'] == 'MONO'].copy()
+
+df_mosaic = ann.obs[ann.obs['coculture'] == 'MOSAIC'].copy()
+#+end_src
+
+Run MASC for each chimera separately
+#+begin_src R
+library(lme4)
+source("masc.R")
+
+filepath <- 'aux-files/MASC_mosaic-cultures-metadata.csv'
+df.all <-read.csv(filepath)
+df.all$Cell.Type <- as.factor(df.all$Cell.Type)
+df.all$condition <- as.factor(df.all$condition)
+df.all$condition <- relevel(df.all$condition, ref = "UNT")
+
+
+
+df <- subset(df.all, cellline == "SNCA3x")
+res <- MASC(data = df, cluster = df$Cell.Type, contrast = "condition", random_effects = "genotype")
+write.csv(res, 'aux-files/MASC_summary-mosaic-PD.csv')
+
+df <- subset(df.all, cellline == "SNCAWT")
+res2 <- MASC(data = df, cluster = df$Cell.Type, contrast = "condition", random_effects = "genotype")
+write.csv(res2, 'aux-files/MASC_summary-mosaic-PD-corr.csv')
+#+end_src
+
+#+RESULTS:
+: Could not parse R result
+* Supplementary Tables
+
+#+begin_src python
+<<imports_local>>
+
+ann = sc.read("curated-objects/all-samples-culture-raw.h5ad")
+
+ann.obs["10x_sample"] = ann.obs[["cellline","coculture","condition"]].apply(lambda x : "_".join(x), axis = 1)
+
+#+end_src
+
+#+RESULTS:
+
+
+
+#+begin_src python
+ann.obs.groupby(["10x_sample"]).size()
+
+#+end_src
+
+#+RESULTS:
+#+begin_example
+10x_sample
+KOLF2_MONO_ROT       16512
+KOLF2_MONO_UNT       12672
+SNCA3x_MONO_ROT      16353
+SNCA3x_MONO_UNT      11762
+SNCA3x_MOSAIC_ROT    17534
+SNCA3x_MOSAIC_UNT    15668
+SNCAWT_MONO_ROT      13972
+SNCAWT_MONO_UNT      10401
+SNCAWT_MOSAIC_ROT    13377
+SNCAWT_MOSAIC_UNT    13611
+dtype: int64
+#+end_example
+
+#+begin_src python :pandoc t
+
+ann.obs.groupby(["10x_sample","genotype"]).size().unstack()
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+| genotype          | KOLF2 | None |  SNCA |
+|-------------------+-------+------+-------|
+| 10x_sample        |       |      |       |
+| KOLF2_MONO_ROT    | 16503 |    9 |     0 |
+| KOLF2_MONO_UNT    | 12668 |    4 |     0 |
+| SNCA3x_MONO_ROT   |     0 |    6 | 16347 |
+| SNCA3x_MONO_UNT   |     0 |    4 | 11758 |
+| SNCA3x_MOSAIC_ROT | 14198 | 1404 |  1932 |
+| SNCA3x_MOSAIC_UNT |  8468 | 1858 |  5342 |
+| SNCAWT_MONO_ROT   |     0 |    8 | 13964 |
+| SNCAWT_MONO_UNT   |     0 |    5 | 10396 |
+| SNCAWT_MOSAIC_ROT | 11861 |  530 |   986 |
+| SNCAWT_MOSAIC_UNT | 12072 |  498 |  1041 |
+:END:
+
+
+#+begin_src python :pandoc t
+
+ann.obs.groupby(["10x_sample","scrublet_singlet"]).size().unstack()
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+| scrublet_singlet  | False | True  |
+|-------------------+-------+-------|
+| 10x_sample        |       |       |
+| KOLF2_MONO_ROT    | 4674  | 11838 |
+| KOLF2_MONO_UNT    | 3327  | 9345  |
+| SNCA3x_MONO_ROT   | 4970  | 11383 |
+| SNCA3x_MONO_UNT   | 3017  | 8745  |
+| SNCA3x_MOSAIC_ROT | 4922  | 12612 |
+| SNCA3x_MOSAIC_UNT | 5392  | 10276 |
+| SNCAWT_MONO_ROT   | 3758  | 10214 |
+| SNCAWT_MONO_UNT   | 2553  | 7848  |
+| SNCAWT_MOSAIC_ROT | 3056  | 10321 |
+| SNCAWT_MOSAIC_UNT | 2808  | 10803 |
+:END:
+
+
+#+begin_src python :pandoc t
+
+ann = sc.read("curated-objects/all-celltypes.h5ad")
+
+ann.obs["10x_sample"] = ann.obs[["cellline","coculture","condition"]].apply(lambda x : "_".join(x), axis = 1)
+
+ann.obs["10x_sample"].value_counts()
+#+end_src
+
+#+RESULTS:
+| 10x_sample        | cells |
+|-------------------+-------|
+| SNCA3x_MOSAIC_ROT |  9588 |
+| KOLF2_MONO_ROT    |  8913 |
+| SNCAWT_MOSAIC_UNT |  8438 |
+| SNCA3x_MONO_ROT   |  8344 |
+| SNCAWT_MOSAIC_ROT |  7983 |
+| SNCA3x_MOSAIC_UNT |  7515 |
+| KOLF2_MONO_UNT    |  7298 |
+| SNCAWT_MONO_ROT   |  6497 |
+| SNCA3x_MONO_UNT   |  6319 |
+| SNCAWT_MONO_UNT   |  5536 |
+
+#+end_example
+
+
+#+begin_src python :pandoc t
+ann.obs.groupby(["cellline","coculture","condition", "genotype", "Cell Type"]).size().unstack()
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+|          |           |           | Cell Type | EPI |  FPP | NEU1 | NEU2 |  NS1 |  NS2 | oDAn1 | oDAn2 | oDAn3 |
+|----------+-----------+-----------+-----------+-----+------+------+------+------+------+-------+-------+-------|
+| cellline | coculture | condition | genotype  |     |      |      |      |      |      |       |       |       |
+| KOLF2    | MONO      | ROT       | KOLF2     | 117 |  618 |  329 |  373 | 1271 | 1225 |   384 |   648 |  3948 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           | UNT       | KOLF2     |   5 |  853 |  157 |  598 |  837 |  335 |   847 |   782 |  2884 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          | MOSAIC    | ROT       | KOLF2     |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           | UNT       | KOLF2     |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+| SNCA3x   | MONO      | ROT       | KOLF2     |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-3x   | 474 |  853 |  418 |  529 |  343 |  272 |   491 |   485 |  4479 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           | UNT       | KOLF2     |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-3x   | 413 |  589 |  465 |  396 |  189 |   75 |   908 |   445 |  2839 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          | MOSAIC    | ROT       | KOLF2     |  50 |  197 |  183 |  533 |  757 | 2872 |    85 |   649 |  3180 |
+|          |           |           | SNCA-3x   |  97 |  108 |    0 |   29 |   20 |  180 |    29 |     7 |   612 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           | UNT       | KOLF2     |  85 |  192 |  164 |  138 |  349 |  381 |   375 |   307 |  2723 |
+|          |           |           | SNCA-3x   | 128 |  141 |   16 |   29 |  213 |  261 |   266 |   385 |  1362 |
+|          |           |           | SNCA-corr |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+| SNCAWT   | MONO      | ROT       | KOLF2     |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr | 440 | 1025 |    1 |    1 |   74 |   44 |   270 |    67 |  4575 |
+|          |           | UNT       | KOLF2     |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr | 453 |  716 |   10 |    6 |  194 |    7 |  1070 |   201 |  2879 |
+|          | MOSAIC    | ROT       | KOLF2     | 132 |  274 |  390 |   28 | 1956 | 1135 |   232 |  1214 |  1969 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr | 143 |   67 |    9 |    4 |   17 |   10 |    59 |    35 |   309 |
+|          |           | UNT       | KOLF2     | 485 |  459 |  150 |  272 | 2078 |  835 |   867 |   986 |  1596 |
+|          |           |           | SNCA-3x   |   0 |    0 |    0 |    0 |    0 |    0 |     0 |     0 |     0 |
+|          |           |           | SNCA-corr | 125 |   97 |    1 |   14 |   57 |   13 |   116 |    46 |   241 |
+:END:
